@@ -12,6 +12,18 @@ def test_run_pi_reads_real_cost_from_the_session_file(fake_pi, tmp_path):
     assert not result.timed_out
 
 
+def test_run_pi_also_reports_real_token_counts_not_just_pis_own_cost_claim(fake_pi, tmp_path):
+    """Real gap found during live testing (2026-10-15): only cost_usd (Pi's own reported figure, never
+    trusted by a ledger service) was surfaced, so every real call was logged at a silent $0.00 until
+    this was fixed -- a ledger needs raw token counts to compute real cost itself."""
+    result = run_pi("job-1", provider="deepseek", model="deepseek-flash", thinking="low",
+                      cwd=tmp_path, session_dir=tmp_path / "sessions")
+    assert result.prompt_tokens == 100
+    assert result.completion_tokens == 50
+    assert result.provider == "deepseek"
+    assert result.model == "deepseek/deepseek-flash"
+
+
 def test_run_pi_reports_the_processs_real_exit_code(fake_pi, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_PI_EXIT_CODE", "3")
     result = run_pi("job-1", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=tmp_path / "sessions")

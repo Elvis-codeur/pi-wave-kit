@@ -1,6 +1,12 @@
 """Spawns `pi` processes (workers or a coordinator) and reports what they actually did: exit status,
-wall time, and real cost read from each one's own session file (via llm_ledger_client.session_ingest's
-Pi adapter -- never a guessed/estimated figure once a process has actually run).
+wall time, and real token usage read from each one's own session file (via
+llm_ledger_client.session_ingest's Pi adapter). `PiResult.cost_usd` is Pi's OWN reported figure --
+evidence only, per this family of libraries' own rule (never trust a provider's self-reported cost as
+the real one; a ledger service computes it from its own ModelPricing table). Pass `PiResult`'s
+`prompt_tokens`/`completion_tokens`/etc. to `llm_ledger_client.LedgerClient.log_call()`, NOT `cost_usd`
+-- a real gap found by actually logging a real run's cost into a live ledger service during
+development: only the reported cost was being surfaced, which the ledger correctly never looks at, so
+every real call was logged at a silent, wrong $0.00 until this was fixed.
 
 Two layers: `start_pi()`/`collect_pi_result()` are non-blocking primitives (wave.py's scheduler polls
 many processes at once, so it can never block on one). `run_pi()` is the blocking convenience wrapper
@@ -37,7 +43,13 @@ class PiResult:
     returncode: int | None  # None if the process was killed for exceeding timeout_seconds
     wall_seconds: float
     session_file: Path | None
-    cost_usd: float  # 0.0 if no session file was found or it had no usage records
+    cost_usd: float  # Pi's OWN reported cost -- evidence only, never the real recorded cost (see module docstring)
+    prompt_tokens: int = 0  # real token counts, for a caller to get the ledger to compute REAL cost from ModelPricing
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    provider: str = ""
+    model: str = ""
     timed_out: bool = False
     log_path: Path | None = None
     extra: dict = field(default_factory=dict)
@@ -90,14 +102,26 @@ def collect_pi_result(handle: PiHandle, *, timed_out: bool = False) -> PiResult:
     new_files = sorted(after - handle.session_files_before)
     session_file = new_files[0] if len(new_files) == 1 else None
     cost = 0.0
+    prompt_tokens = completion_tokens = cache_read_tokens = cache_creation_tokens = 0
+    provider = model = ""
     if session_file is not None:
         try:
-            cost = sum(r.reported_cost_usd or 0.0 for r in read_usage("pi", session_file))
+            records = read_usage("pi", session_file)
+            cost = sum(r.reported_cost_usd or 0.0 for r in records)
+            prompt_tokens = sum(r.prompt_tokens for r in records)
+            completion_tokens = sum(r.completion_tokens for r in records)
+            cache_read_tokens = sum(r.cache_read_tokens for r in records)
+            cache_creation_tokens = sum(r.cache_creation_tokens for r in records)
+            if records:
+                provider, model = records[-1].provider, records[-1].model
         except Exception:
             cost = 0.0
     return PiResult(
         job_id=handle.job_id, returncode=handle.proc.returncode, wall_seconds=wall,
         session_file=session_file, cost_usd=cost, timed_out=timed_out,
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens,
+        provider=provider, model=model,
         extra={"new_session_files": [str(f) for f in new_files]} if len(new_files) != 1 else {},
     )
 
