@@ -41,12 +41,28 @@ summary = run_wave(
 print(summary.committed_usd, summary.not_successful())
 ```
 
-## Cost tracking
+## Cost tracking is embedded, not a separate step
 
-`run_pi`'s cost comes from the worker's own Pi session file (via
-[llm-ledger-client](https://github.com/Elvis-codeur/llm-ledger-client)'s Pi adapter) — real, not
-estimated, once a process has actually run. Feed it into a shared ledger with
-`llm_ledger_client.session_ingest.import_session()` after each job, or during `collect_fn`.
+`run_pi`/`collect_pi_result` read real token counts from the worker's own Pi session file (via
+[llm-ledger-client](https://github.com/Elvis-codeur/llm-ledger-client)'s Pi adapter), and — pass
+`ledger`/`run_pk` — log them to that ledger run automatically before returning:
+
+```python
+from llm_ledger_client import LedgerClient
+from pi_wave_kit.run_pi import collect_pi_result
+
+ledger = LedgerClient("http://127.0.0.1:8090/api")
+run = ledger.create_run("wave-2026-10-15", label="translation-wave")
+
+def collect(handle, timed_out):
+    # ledger+run_pk here means every job logs itself as it finishes -- no separate "now call
+    # log_call()" step for whatever is running the wave to remember.
+    return my_wrapper(collect_pi_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run["id"]))
+```
+
+Omit `ledger`/`run_pk` and nothing changes from before — this is opt-in, not required. But wiring it in
+once, here, means every job in every wave logs itself for the lifetime of the pipeline; nothing further
+to remember per job, per wave, or per agent that happens to be the one running it that day.
 
 ## The coordinator role doesn't have to be a Pi session
 

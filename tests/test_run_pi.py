@@ -70,3 +70,60 @@ def test_two_concurrent_processes_sharing_one_session_dir_are_not_attributed_to_
     assert r1.session_file is None and r1.cost_usd == 0.0
     assert r2.session_file is None and r2.cost_usd == 0.0
     assert len(r1.extra["new_session_files"]) == 2
+
+
+class _FakeLedger:
+    """Records what log_call() was called with -- no real HTTP, this is purely for asserting the
+    embedded-logging contract (what gets logged, not whether LedgerClient itself works)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def log_call(self, run_pk, **kwargs):
+        self.calls.append((run_pk, kwargs))
+        return {"id": len(self.calls)}
+
+
+def test_run_pi_logs_to_the_ledger_automatically_when_given_one(fake_pi, tmp_path):
+    """The actual point of embedding this: the caller does NOT call log_call() itself -- passing
+    ledger+run_pk to run_pi() is the only thing it has to do, logging happens as a side effect."""
+    ledger = _FakeLedger()
+    result = run_pi(
+        "job-1", provider="deepseek", model="deepseek-flash", thinking="low",
+        cwd=tmp_path, session_dir=tmp_path / "sessions", ledger=ledger, run_pk=42,
+    )
+    assert len(ledger.calls) == 1
+    run_pk, kwargs = ledger.calls[0]
+    assert run_pk == 42
+    assert kwargs["provider"] == result.provider
+    assert kwargs["model"] == result.model
+    assert kwargs["prompt_tokens"] == 100
+    assert kwargs["completion_tokens"] == 50
+    assert kwargs["billing"] == "api"
+    assert kwargs["external_id"] == "pi-wave-kit:job-1"
+
+
+def test_run_pi_does_not_log_when_no_ledger_is_given(fake_pi, tmp_path):
+    """Backward-compatible: omitting ledger/run_pk changes nothing about existing behavior."""
+    result = run_pi("job-1", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=tmp_path / "sessions")
+    assert result.cost_usd == 0.001  # unaffected
+
+
+def test_run_pi_does_not_log_when_run_pk_is_missing_even_with_a_ledger(fake_pi, tmp_path):
+    ledger = _FakeLedger()
+    run_pi("job-1", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=tmp_path / "sessions", ledger=ledger)
+    assert ledger.calls == []
+
+
+def test_collect_pi_result_does_not_log_when_the_process_produced_no_usage(fake_pi, tmp_path):
+    """Two concurrent processes sharing a session_dir both end up with session_file=None/no usage --
+    there's nothing real to log, and this must not crash or log a bogus zero-usage call."""
+    ledger = _FakeLedger()
+    shared = tmp_path / "shared-sessions"
+    h1 = start_pi("job-1", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=shared)
+    h2 = start_pi("job-2", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=shared)
+    h1.proc.wait()
+    h2.proc.wait()
+    collect_pi_result(h1, ledger=ledger, run_pk=1)
+    collect_pi_result(h2, ledger=ledger, run_pk=1)
+    assert ledger.calls == []
