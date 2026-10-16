@@ -19,6 +19,8 @@ for running just one (a single ad-hoc task, or a test)."""
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import subprocess
 import time
 import uuid
@@ -92,7 +94,10 @@ def start_pi(
     before = set(session_dir.glob("*.jsonl"))
     cmd = _build_command(provider, model, thinking, session_dir, prompt, extra_args)
     log_f = open(log_path, "w", encoding="utf-8") if log_path else subprocess.DEVNULL
-    proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT)
+    # Own process group, so a timeout kill also reaches any child processes the agent spawned (subagents,
+    # tools) -- proc.kill() alone only killed the parent (real gap found in review, 2026-10-16).
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
+                            start_new_session=True)
     return PiHandle(
         job_id=job_id, proc=proc, session_dir=session_dir, session_files_before=before,
         log_file=log_f, started_monotonic=time.monotonic(), timeout_seconds=timeout_seconds,
@@ -122,31 +127,43 @@ def collect_pi_result(
     wall = time.monotonic() - handle.started_monotonic
     after = set(handle.session_dir.glob("*.jsonl"))
     new_files = sorted(after - handle.session_files_before)
-    session_file = new_files[0] if len(new_files) == 1 else None
+    # Real bug fixed 2026-10-16: this used to read the session file only when EXACTLY ONE new file existed and
+    # silently report $0 otherwise -- a relaunched/forked job leaves several, so the 2026-10-15 S2-correction
+    # wave recorded $5.96 while its session files show $14.51 actually spent. Now: sum usage over ALL new files.
+    session_file = new_files[0] if new_files else None
     cost = 0.0
     prompt_tokens = completion_tokens = cache_read_tokens = cache_creation_tokens = 0
     provider = model = ""
-    if session_file is not None:
+    for f in new_files:
         try:
-            records = read_usage("pi", session_file)
-            cost = sum(r.reported_cost_usd or 0.0 for r in records)
-            prompt_tokens = sum(r.prompt_tokens for r in records)
-            completion_tokens = sum(r.completion_tokens for r in records)
-            cache_read_tokens = sum(r.cache_read_tokens for r in records)
-            cache_creation_tokens = sum(r.cache_creation_tokens for r in records)
-            if records:
-                provider, model = records[-1].provider, records[-1].model
+            records = read_usage("pi", f)
         except Exception:
-            cost = 0.0
+            _logger.warning("pi_wave_kit: could not read usage from %s (cost may be under-counted)", f)
+            continue
+        cost += sum(r.reported_cost_usd or 0.0 for r in records)
+        prompt_tokens += sum(r.prompt_tokens for r in records)
+        completion_tokens += sum(r.completion_tokens for r in records)
+        cache_read_tokens += sum(r.cache_read_tokens for r in records)
+        cache_creation_tokens += sum(r.cache_creation_tokens for r in records)
+        if records:
+            provider, model = records[-1].provider, records[-1].model
     result = PiResult(
         job_id=handle.job_id, returncode=handle.proc.returncode, wall_seconds=wall,
         session_file=session_file, cost_usd=cost, timed_out=timed_out,
         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
         cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens,
         provider=provider, model=model,
-        extra={"new_session_files": [str(f) for f in new_files]} if len(new_files) != 1 else {},
+        extra={"new_session_files": [str(f) for f in new_files], "ambiguous_attribution": True}
+              if len(new_files) > 1 else ({"new_session_files": []} if not new_files else {}),
     )
-    if ledger is not None and run_pk is not None:
+    if len(new_files) > 1:
+        # Cost above is the SUM over all new files -- conservative for cap accounting (never under-counts real
+        # money). But the files may belong to another process sharing this session_dir, so the per-call ledger
+        # entry is skipped rather than risk double-booking; the warning makes the gap visible.
+        _logger.warning("pi_wave_kit: job %s left %d new session files; cost $%.4f counted for caps, ledger entry "
+                        "skipped (ambiguous attribution) -- give every job its own session_dir", handle.job_id,
+                        len(new_files), cost)
+    elif ledger is not None and run_pk is not None:
         _log_to_ledger(ledger, run_pk, result, call_purpose)
     return result
 
@@ -168,8 +185,17 @@ def _log_to_ledger(ledger: LedgerClient, run_pk: int, result: PiResult, call_pur
         call_purpose=call_purpose,
         # Pi's own reported cost, kept only as evidence alongside the real server-computed cost --
         # never read back as the actual spend (see module docstring).
-        api_equivalent_cost_usd=result.cost_usd,
+        api_equivalent_cost_usd=round(result.cost_usd, 6),  # server field has 6 decimal places (400 otherwise)
     )
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the whole process group (the agent and any children it spawned), then reap the parent."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    proc.wait()
 
 
 def kill_if_timed_out(handle: PiHandle) -> bool:
@@ -179,8 +205,7 @@ def kill_if_timed_out(handle: PiHandle) -> bool:
         return False
     if time.monotonic() - handle.started_monotonic <= handle.timeout_seconds:
         return False
-    handle.proc.kill()
-    handle.proc.wait()
+    _kill_group(handle.proc)
     return True
 
 
@@ -200,8 +225,7 @@ def run_pi(
     try:
         handle.proc.wait(timeout=handle.timeout_seconds)
     except subprocess.TimeoutExpired:
-        handle.proc.kill()
-        handle.proc.wait()
+        _kill_group(handle.proc)
         timed_out = True
     return collect_pi_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk, call_purpose=call_purpose)
 

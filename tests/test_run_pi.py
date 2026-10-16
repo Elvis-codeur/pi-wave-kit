@@ -56,7 +56,7 @@ def test_kill_if_timed_out_only_kills_once_the_deadline_passes(fake_pi, tmp_path
     assert handle.proc.poll() is not None
 
 
-def test_two_concurrent_processes_sharing_one_session_dir_are_not_attributed_to_either(fake_pi, tmp_path):
+def test_two_concurrent_processes_sharing_one_session_dir_count_conservatively(fake_pi, tmp_path):
     """The real collision case: two processes writing to the SAME session_dir concurrently -- each
     one's "before" snapshot predates the other's file, so both see 2 new files at the end. Must not
     crash or silently pick the wrong one for either -- session_file stays None, visible in `extra`."""
@@ -67,8 +67,10 @@ def test_two_concurrent_processes_sharing_one_session_dir_are_not_attributed_to_
     h2.proc.wait()
     r1 = collect_pi_result(h1)
     r2 = collect_pi_result(h2)
-    assert r1.session_file is None and r1.cost_usd == 0.0
-    assert r2.session_file is None and r2.cost_usd == 0.0
+    # 2026-10-16: never silently $0 again (that hid $8.55 of real spend) -- both files' cost is counted for
+    # cap accounting (conservative: may over-count when a dir is shared, never under-counts) and flagged.
+    assert r1.cost_usd > 0.0 and r2.cost_usd > 0.0
+    assert r1.extra["ambiguous_attribution"] and r2.extra["ambiguous_attribution"]
     assert len(r1.extra["new_session_files"]) == 2
 
 
@@ -127,3 +129,16 @@ def test_collect_pi_result_does_not_log_when_the_process_produced_no_usage(fake_
     collect_pi_result(h1, ledger=ledger, run_pk=1)
     collect_pi_result(h2, ledger=ledger, run_pk=1)
     assert ledger.calls == []
+
+
+def test_sequential_relaunches_in_one_session_dir_sum_all_spend(fake_pi, tmp_path):
+    """The real 2026-10-15 case: a job relaunched into the same session_dir leaves several files; collect must
+    count every new file's cost, not report $0."""
+    d = tmp_path / "s"
+    h0 = start_pi("j", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=d)
+    h0.proc.wait()
+    first = collect_pi_result(h0)
+    h1 = start_pi("j", provider="deepseek", model="x", thinking="low", cwd=tmp_path, session_dir=d)
+    h1.proc.wait()
+    second = collect_pi_result(h1)
+    assert first.cost_usd > 0.0 and second.cost_usd > 0.0, "each launch's own new file must be counted"
