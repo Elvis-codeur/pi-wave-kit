@@ -86,7 +86,9 @@ def run_wave(
     log = on_event or (lambda _msg: None)
     raw = load_summary(summary_path)
     raw.setdefault("jobs", {})
-    committed = sum(r.get("cost_usd", 0.0) for r in raw["jobs"].values() if r.get("status") == "success")
+    # ALL recorded spend counts against the cap, whatever the job's status -- a failed job's money is still
+    # gone (real gap found in review 2026-10-16: counting only "success" let repeated relaunches exceed the cap).
+    committed = sum(r.get("cost_usd", 0.0) for r in raw["jobs"].values())
 
     queue = [j for j in jobs if raw["jobs"].get(j.job_id, {}).get("status") != "success"]
     skipped = [j.job_id for j in jobs if j not in queue]
