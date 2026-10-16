@@ -113,7 +113,10 @@ def run_wave(
             committed += result.cost_usd
             summary.finished[job_id] = result
             summary.launched.append(job_id)
-            raw["jobs"][job_id] = {"status": result.status, "cost_usd": result.cost_usd, "reason": result.reason}
+            # ACCUMULATE across attempts: a retried job's earlier spend is still real money (review 2026-10-16).
+            prior = raw["jobs"].get(job_id, {}).get("cost_usd", 0.0)
+            raw["jobs"][job_id] = {"status": result.status, "cost_usd": prior + result.cost_usd,
+                                   "reason": result.reason}
             write_summary(summary_path, raw)
             del running[job_id]
             log(f"done {job_id}: {result.status}, ${result.cost_usd:.4f}, committed ${committed:.4f}")
