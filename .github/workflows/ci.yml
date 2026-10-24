@@ -20,11 +20,15 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install pi-wave-kit (+ dev extras)
-        run: uv pip install --system -e ".[dev]"
+      # A real venv (not --system -- the runner's system Python is externally managed and
+      # refuses package installs outright), same as local dev setup in CONTRIBUTING.md.
+      - name: Create venv and install pi-wave-kit (+ dev extras)
+        run: |
+          uv venv --python 3.12
+          uv pip install -e ".[dev]"
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: .venv/bin/ruff check .
 
       - name: Test (pytest, full suite)
-        run: pytest -v
+        run: .venv/bin/pytest -v
