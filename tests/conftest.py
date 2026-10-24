@@ -78,6 +78,69 @@ def fake_pi_resumable(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def fake_screen(tmp_path, monkeypatch):
+    """A fake `screen` on PATH that supports exactly the four sub-commands
+    `pi_wave_kit.interactive` uses: `-dmS <name> <cmd...>` (spawns `cmd` detached, tracked by a pidfile
+    under a state dir), `-ls` (lists still-alive tracked sessions in screen's own
+    `\tPID.NAME\t(date)\t(Detached)` format), `-S <name> -X hardcopy <path>` (writes a canned marker,
+    alive or dead), and `-S <name> -X quit` (kills the tracked pid). Good enough to exercise
+    interactive.py's real argv-building and parsing without needing the real `screen` binary (not
+    guaranteed present in CI)."""
+    state_dir = tmp_path / "fake-screen-state"
+    state_dir.mkdir()
+    script = tmp_path / "screen"
+    script.write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env python3
+        import os, subprocess, sys, time
+        STATE = {str(state_dir)!r}
+        args = sys.argv[1:]
+
+        def pidfile(name):
+            return os.path.join(STATE, name + ".pid")
+
+        if "-dmS" in args:
+            i = args.index("-dmS")
+            name = args[i + 1]
+            cmd = args[i + 2:]
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+            with open(pidfile(name), "w") as f:
+                f.write(str(proc.pid))
+        elif "-ls" in args:
+            for fn in os.listdir(STATE):
+                if not fn.endswith(".pid"):
+                    continue
+                name = fn[:-4]
+                pid = int(open(pidfile(name)).read())
+                try:
+                    os.kill(pid, 0)
+                    print(f"\\t{{pid}}.{{name}}\\t(10/25/2026 00:00:00 AM)\\t(Detached)")
+                except ProcessLookupError:
+                    os.remove(pidfile(name))
+        elif "-X" in args:
+            si = args.index("-S")
+            name = args[si + 1]
+            xi = args.index("-X")
+            action = args[xi + 1]
+            if action == "hardcopy":
+                out_path = args[xi + 2]
+                alive = os.path.exists(pidfile(name))
+                with open(out_path, "w") as f:
+                    f.write(f"fake hardcopy for {{name}}, alive={{alive}}\\n")
+            elif action == "quit":
+                if os.path.exists(pidfile(name)):
+                    pid = int(open(pidfile(name)).read())
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
+                    os.remove(pidfile(name))
+    """), encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    return script
+
+
+@pytest.fixture
 def fake_systemd_run(tmp_path, monkeypatch):
     """A fake `systemd-run` on PATH that just execs everything after its own flags/`--`, the same
     way the real `systemd-run --user --scope` execs its target command in place. Lets
