@@ -2,10 +2,8 @@
 (tests/test_pi_wave.py, agentic-doc-treatement): writes a synthetic session JSONL with a real usage
 record, so run_pi.py's cost-reading path is exercised against a real file, not mocked away."""
 
-import json
 import os
 import stat
-import sys
 import textwrap
 
 import pytest
