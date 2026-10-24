@@ -25,6 +25,13 @@ include = ["pi_wave_kit*"]
 [tool.setuptools.package-data]
 "pi_wave_kit.plugins.stt_translation" = ["prompts/*.md"]
 
+[tool.uv.sources]
+# llm-ledger-client is not published to PyPI (it's this project family's own sibling repo,
+# github.com/Elvis-codeur/llm-ledger-client, public). Local dev usually has it checked out
+# alongside this repo and installed editable from there; this source lets a clean environment
+# (CI, or a fresh clone with no sibling checkout) resolve it anyway.
+llm-ledger-client = { git = "https://github.com/Elvis-codeur/llm-ledger-client" }
+
 [tool.ruff]
 # 160, not the default 88/120: this codebase's own narrative style (long docstrings-as-comments
 # explaining WHY, dense one-liners in tests) already runs past 120 in places -- checked the real
