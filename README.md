@@ -85,6 +85,32 @@ later = resume_pi_headless("job-1-resume", session=first.session_file, prompt="W
 even though the file isn't new (resuming appends to it): only the usage records added by THIS call are
 counted, never the whole file's history re-counted or silently reported as $0.
 
+## A long-lived interactive session, and remote steering (with a real constraint)
+
+`pi_wave_kit.interactive` launches a real interactive `pi` session wrapped in `screen` so it stays
+alive and reachable instead of exiting after one turn (confirmed live, 2026-10-24: `pi -p`, and a
+backgrounded interactive session with no real pty, both exit after one turn on EOF):
+
+```python
+from pi_wave_kit.interactive import launch_screen_session, is_alive, hardcopy, stop
+
+session = launch_screen_session("alpha", provider="deepseek", model="deepseek-flash", thinking="low",
+                                 cwd="project-dir", session_dir="sessions",
+                                 initial_prompt="Stand by.")
+is_alive(session)        # True while pi is still running inside the screen scope
+hardcopy(session, "hc.txt")   # the session's real terminal contents, not a self-report
+stop(session)
+```
+
+**Real constraint, confirmed live, not assumed**: this is the whole mechanism for remote control.
+There is no way to message an arbitrary already-running `pi` session from outside `pi` -- pi-messenger
+ships no sending CLI. Reaching a live session means running ANOTHER `pi` agent (e.g. via `run_pi()`)
+that calls the `pi_messenger` tool itself, AND the target session must already (1) run under a real
+pty (this module) and (2) have joined the pi-messenger mesh (`autoRegister` in its own
+`.pi/pi-messenger.json`). **An owner who wants this must launch every interactive session this way,
+with that config already in place** -- a session started some other way is not remotely reachable at
+all, however it's running.
+
 ## A single ad-hoc job from the command line
 
 For one job that doesn't need a whole wave, `pi-wave-job` (console script, installed with this
