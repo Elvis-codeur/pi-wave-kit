@@ -30,6 +30,7 @@ reachable from outside."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +63,13 @@ def launch_screen_session(
     """Start a real interactive `pi` session inside a detached `screen` scope named `name`.
     `initial_prompt`, if given, is passed to `pi` as its first message, the same way `pi "do X"` works
     when run directly. `approve` passes `--approve` (trust project-local files, e.g.
-    `.pi/pi-messenger.json`'s `autoRegister`) -- set False if that trust isn't wanted for this run."""
+    `.pi/pi-messenger.json`'s `autoRegister`) -- set False if that trust isn't wanted for this run.
+
+    Sets `PI_AGENT_NAME=<name>` on the launched process -- a real bug found by this function's own
+    manual smoke test (2026-10-25): `--name` alone only sets the session's display title, NOT its
+    pi-messenger mesh identity, so without this env var a peer sees a random auto-generated name
+    (e.g. `QuickRaven`) instead of `name`, making the whole point of calling this with a chosen,
+    known `name` -- being reachable at a name the caller picked -- silently not true."""
     session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -78,7 +85,9 @@ def launch_screen_session(
         cmd += ["-L", "-Logfile", str(log_path)]
     cmd += ["-dmS", name, *pi_cmd]
 
-    subprocess.run(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, check=True)
+    env = os.environ.copy()
+    env["PI_AGENT_NAME"] = name
+    subprocess.run(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, check=True, env=env)
     return ScreenSession(name=name, log_path=Path(log_path) if log_path else None)
 
 

@@ -6,6 +6,74 @@ cap**, with an escalation protocol and a generic stage-check framework. Extracte
 translation pipeline's real, months-long production use orchestrating DeepSeek translation waves
 (10 concurrent workers, hundreds of documents, real dollar caps that were never exceeded).
 
+## Launching a remotely-reachable session (so you can steer it later, from elsewhere)
+
+`pi -p` (headless) processes one prompt and exits; a backgrounded *interactive* session with no real
+pty hits EOF on its next input and dies after one turn too -- confirmed live. The only way to leave an
+interactive session alive and reachable is a real pty (`screen` or `tmux`), joined to the pi-messenger
+mesh. This is confirmed, working, and has one real constraint that cannot be worked around: **the
+session must be launched this way in the first place** -- one started by typing `pi` normally, with no
+mesh auto-join, is not remotely reachable later, however long it keeps running.
+
+### The exact by-hand terminal command (no app, no library -- freshly re-tested 2026-10-24)
+
+```bash
+# once per project directory, so the session is reachable by anyone who messages it by name:
+mkdir -p .pi && echo '{"autoRegister": true}' > .pi/pi-messenger.json
+
+PI_AGENT_NAME=Home screen -L -Logfile screen.log -dmS Home \
+  pi --provider deepseek --model deepseek-flash --thinking low \
+     --session-dir sessions --name Home --approve \
+     "Standby. Remember the codeword TOUCAN-9. Reply ACK-TOUCAN-9-<message> to anything you receive."
+```
+
+`PI_AGENT_NAME=Home` is required, not optional: `--name` alone only sets the session's *display*
+title, not its pi-messenger identity -- without the env var a peer sees a random generated name
+(`QuickRaven`, etc.) instead of the name you chose, so a message addressed to "Home" would never
+arrive. `screen -dmS Home ... pi ...` execs `pi` in place, so the screen scope lives exactly as long
+as `pi` does.
+
+**Confirm it worked:** `screen -ls` lists `<pid>.Home (Detached)` while it's alive; after about 10-15
+seconds, `.pi/messenger/feed.jsonl` in that directory gets a `{"type":"join","agent":"Home"}` line --
+that's the real, independently-checkable proof it joined the mesh (never trust a session's own
+"I'm standing by" reply for this). `screen -S Home -X hardcopy out.txt` dumps its live terminal.
+
+**Message it from elsewhere** (there is no sending CLI for pi-messenger -- the sender must itself be
+another `pi` agent calling the `pi_messenger` tool; a plain script or `curl` cannot reach it this way):
+
+```bash
+PI_AGENT_NAME=Away pi -p --session-dir away-sessions \
+  "Use pi_messenger to join the mesh if needed, then send a DM to the peer named Home with exactly \
+this text: PING-FROM-AWAY. Report success or failure only." < /dev/null
+```
+
+Re-tested live end to end just before writing this: `Away`'s `PING-FROM-AWAY` was delivered and
+`Home` replied `ACK-TOUCAN-9-...` 1.18 seconds later, both lines confirmed in `feed.jsonl`, not from
+either agent's own report of what happened. Stop a session with `screen -S Home -X quit`.
+
+### Doing the same thing with this library, one command
+
+```bash
+pi-wave-session launch Home deepseek-flash /path/to/project \
+    --prompt "Standby. Remember the codeword TOUCAN-9. Reply ACK-TOUCAN-9-<message> to anything you receive." \
+    --provider deepseek --thinking low
+pi-wave-session status Home     # alive / not running
+pi-wave-session hardcopy Home   # dump its live terminal
+pi-wave-session stop Home
+```
+
+`launch` does the by-hand recipe above AND writes `.pi/pi-messenger.json` for you if that project
+doesn't already have one (never overwrites an existing one) -- so the session it starts is really
+reachable, not just alive. Pass `--no-mesh` to skip that if the project already manages its own
+messenger config. Equivalent Python: `pi_wave_kit.interactive.launch_screen_session()` /
+`is_alive()` / `hardcopy()` / `stop()`.
+
+### Why there's no CLI for *sending* a message
+
+Sending needs no new wrapper: it's just `pi_wave_kit.run_pi.run_pi()` (or a plain `pi -p` call, as
+above) with a prompt telling a one-shot agent to use the `pi_messenger` tool -- that genuinely is
+what sending requires, since pi-messenger has no sending CLI of its own.
+
 ## What's generic here, and what isn't
 
 The **hard part** — a rolling pool that only launches a new job if `committed + reserved-by-running-jobs
@@ -84,32 +152,6 @@ later = resume_pi_headless("job-1-resume", session=first.session_file, prompt="W
 `session` must be the earlier call's own session FILE PATH (not a bare id). Cost is counted correctly
 even though the file isn't new (resuming appends to it): only the usage records added by THIS call are
 counted, never the whole file's history re-counted or silently reported as $0.
-
-## A long-lived interactive session, and remote steering (with a real constraint)
-
-`pi_wave_kit.interactive` launches a real interactive `pi` session wrapped in `screen` so it stays
-alive and reachable instead of exiting after one turn (confirmed live, 2026-10-24: `pi -p`, and a
-backgrounded interactive session with no real pty, both exit after one turn on EOF):
-
-```python
-from pi_wave_kit.interactive import launch_screen_session, is_alive, hardcopy, stop
-
-session = launch_screen_session("alpha", provider="deepseek", model="deepseek-flash", thinking="low",
-                                 cwd="project-dir", session_dir="sessions",
-                                 initial_prompt="Stand by.")
-is_alive(session)        # True while pi is still running inside the screen scope
-hardcopy(session, "hc.txt")   # the session's real terminal contents, not a self-report
-stop(session)
-```
-
-**Real constraint, confirmed live, not assumed**: this is the whole mechanism for remote control.
-There is no way to message an arbitrary already-running `pi` session from outside `pi` -- pi-messenger
-ships no sending CLI. Reaching a live session means running ANOTHER `pi` agent (e.g. via `run_pi()`)
-that calls the `pi_messenger` tool itself, AND the target session must already (1) run under a real
-pty (this module) and (2) have joined the pi-messenger mesh (`autoRegister` in its own
-`.pi/pi-messenger.json`). **An owner who wants this must launch every interactive session this way,
-with that config already in place** -- a session started some other way is not remotely reachable at
-all, however it's running.
 
 ## A single ad-hoc job from the command line
 
