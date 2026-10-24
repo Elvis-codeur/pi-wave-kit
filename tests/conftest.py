@@ -41,3 +41,22 @@ def fake_pi(tmp_path, monkeypatch):
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     return script
+
+
+@pytest.fixture
+def fake_systemd_run(tmp_path, monkeypatch):
+    """A fake `systemd-run` on PATH that just execs everything after its own flags/`--`, the same
+    way the real `systemd-run --user --scope` execs its target command in place. Lets
+    CgroupLimits-wrapped commands be tested without a real systemd user session (not guaranteed
+    available in CI/sandboxes) while still exercising the real argv-prefixing path end to end."""
+    script = tmp_path / "systemd-run"
+    script.write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import os, sys
+        args = sys.argv[1:]
+        i = args.index("--")
+        os.execvp(args[i + 1], args[i + 1:])
+    """), encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    return script

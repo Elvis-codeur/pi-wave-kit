@@ -1,4 +1,4 @@
-from pi_wave_kit.run_pi import collect_pi_result, kill_if_timed_out, run_pi, start_pi
+from pi_wave_kit.run_pi import CgroupLimits, collect_pi_result, kill_if_timed_out, run_pi, start_pi
 
 
 def test_run_pi_reads_real_cost_from_the_session_file(fake_pi, tmp_path):
@@ -142,3 +142,43 @@ def test_sequential_relaunches_in_one_session_dir_sum_all_spend(fake_pi, tmp_pat
     h1.proc.wait()
     second = collect_pi_result(h1)
     assert first.cost_usd > 0.0 and second.cost_usd > 0.0, "each launch's own new file must be counted"
+
+
+def test_cgroup_limits_default_mem_high_is_ninety_percent_of_mem_max():
+    assert CgroupLimits(mem_max="2500M").resolved_mem_high() == "2250M"
+    assert CgroupLimits(mem_max="4G").resolved_mem_high() == "3G"
+
+
+def test_cgroup_limits_respects_an_explicit_mem_high():
+    assert CgroupLimits(mem_max="2500M", mem_high="2000M").resolved_mem_high() == "2000M"
+
+
+def test_cgroup_limits_mem_high_is_none_when_mem_max_does_not_parse():
+    assert CgroupLimits(mem_max="2.5G").resolved_mem_high() is None
+
+
+def test_cgroup_limits_systemd_run_prefix_shape():
+    prefix = CgroupLimits(mem_max="2500M").systemd_run_prefix()
+    assert prefix[:3] == ["systemd-run", "--user", "--scope"]
+    assert "-p" in prefix and "MemoryMax=2500M" in prefix and "MemoryHigh=2250M" in prefix
+    assert prefix[-1] == "--"
+
+
+def test_run_pi_with_cgroup_still_runs_the_real_pi_process(fake_pi, fake_systemd_run, tmp_path):
+    """The real end-to-end path: start_pi prefixes the command with systemd-run's own argv, and the
+    process that actually runs (and whose session file gets read for cost) is still `pi` -- composing
+    with the existing subprocess/cost-reading logic, not duplicating it."""
+    result = run_pi(
+        "job-1", provider="deepseek", model="deepseek-flash", thinking="low",
+        cwd=tmp_path, session_dir=tmp_path / "sessions",
+        cgroup=CgroupLimits(mem_max="500M"),
+    )
+    assert result.returncode == 0
+    assert result.cost_usd == 0.001
+
+
+def test_run_pi_without_cgroup_is_unaffected(fake_pi, tmp_path):
+    """Backward-compatible: omitting cgroup changes nothing about the command that runs."""
+    result = run_pi("job-1", provider="deepseek", model="x", thinking="low", cwd=tmp_path,
+                      session_dir=tmp_path / "sessions")
+    assert result.returncode == 0

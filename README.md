@@ -64,6 +64,24 @@ Omit `ledger`/`run_pk` and nothing changes from before — this is opt-in, not r
 once, here, means every job in every wave logs itself for the lifetime of the pipeline; nothing further
 to remember per job, per wave, or per agent that happens to be the one running it that day.
 
+## Optional memory isolation per job
+
+Pass a `CgroupLimits` to `start_pi`/`run_pi` and that one process runs under `systemd-run --user
+--scope -p MemoryMax=... -p MemoryHigh=...` instead of a bare `subprocess.Popen` -- oomd then kills
+only that job's scope, never the whole terminal session (a real incident: a single job that ran
+over budget took the entire shell, and every other job running in it, down twice):
+
+```python
+from pi_wave_kit.run_pi import run_pi, CgroupLimits
+
+result = run_pi("job-1", provider="deepseek", model="deepseek-flash", thinking="low",
+                 cwd=".", session_dir="sessions/job-1",
+                 cgroup=CgroupLimits(mem_max="2500M"))  # mem_high defaults to 90% of mem_max
+```
+
+Omit `cgroup` and nothing changes. `systemd-run --scope` execs the target in place (same PID), so
+timeout-kill (`kill_if_timed_out`) still reaches the real process group.
+
 ## The coordinator role doesn't have to be a Pi session
 
 `pi_wave_kit.coordinator` assumes nothing about who's watching the wave — an interactive Pi session
