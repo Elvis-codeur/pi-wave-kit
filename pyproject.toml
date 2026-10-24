@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
+[project.scripts]
+pi-wave-job = "pi_wave_kit.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["pi_wave_kit*"]
 

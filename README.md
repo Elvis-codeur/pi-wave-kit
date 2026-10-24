@@ -64,6 +64,23 @@ Omit `ledger`/`run_pk` and nothing changes from before — this is opt-in, not r
 once, here, means every job in every wave logs itself for the lifetime of the pipeline; nothing further
 to remember per job, per wave, or per agent that happens to be the one running it that day.
 
+## A single ad-hoc job from the command line
+
+For one job that doesn't need a whole wave, `pi-wave-job` (console script, installed with this
+package) is the CLI equivalent of the sibling `agentic-reasoning-translator` project's ad-hoc
+`pi_job.sh`, but built on the tested `run_pi()` path -- it reads the prompt file's content once
+and passes it straight through as a real argv string, never staging it to a destination path, so
+the exact "cp: are the same file" bug class that silently killed a job there (issue #1 / ERRATA
+#43) cannot happen here:
+
+```bash
+pi-wave-job my-job deepseek-flash /path/to/workdir prompt.md \
+    --provider deepseek --thinking low --mem-max 2500M --jobs-dir pi-wave-jobs
+```
+
+Writes `pi-wave-jobs/my-job/{sessions/,log.txt,result.json}` and exits non-zero if the job failed
+or timed out. Run `pi-wave-job --help` for every option.
+
 ## Optional memory isolation per job
 
 Pass a `CgroupLimits` to `start_pi`/`run_pi` and that one process runs under `systemd-run --user
