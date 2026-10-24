@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
@@ -47,6 +48,41 @@ class PiHandle:
     timeout_seconds: float | None
 
 
+@dataclass(frozen=True)
+class CgroupLimits:
+    """Optional `systemd-run --user --scope` memory isolation for one `pi` process -- the same
+    guard the sibling `agentic-reasoning-translator` project adopted as a standing rule after
+    oomd killed an entire terminal session (the shell itself, plus every other job running in
+    it, not just the one job that ran out of memory) twice in one week. `start_pi`/`run_pi`
+    prefix the real `pi` command with `systemd-run`'s own argv when given one of these -- no
+    subprocess logic is duplicated, this only changes what the first argv entries are.
+
+    `mem_high`, if omitted, defaults to 90% of `mem_max` (the same ratio pi_job.sh used) when
+    `mem_max` parses as a plain `<int><M|G>`; pass `mem_high` explicitly for any other unit.
+    `systemd-run --scope` execs the target command in place (same PID), so the existing
+    process-group kill path in `kill_if_timed_out`/`_kill_group` is unaffected."""
+
+    mem_max: str
+    mem_high: str | None = None
+
+    def resolved_mem_high(self) -> str | None:
+        if self.mem_high is not None:
+            return self.mem_high
+        m = re.match(r"^(\d+)([MG])$", self.mem_max)
+        if not m:
+            return None
+        value, unit = m.groups()
+        return f"{int(int(value) * 0.9)}{unit}"
+
+    def systemd_run_prefix(self) -> list[str]:
+        prefix = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={self.mem_max}"]
+        high = self.resolved_mem_high()
+        if high:
+            prefix += ["-p", f"MemoryHigh={high}"]
+        prefix.append("--")
+        return prefix
+
+
 @dataclass
 class PiResult:
     job_id: str
@@ -65,11 +101,14 @@ class PiResult:
     extra: dict = field(default_factory=dict)
 
 
-def _build_command(provider: str, model: str, thinking: str, session_dir: Path, prompt: str | None, extra_args: list[str] | None) -> list[str]:
+def _build_command(provider: str, model: str, thinking: str, session_dir: Path, prompt: str | None,
+                    extra_args: list[str] | None, cgroup: CgroupLimits | None = None) -> list[str]:
     cmd = ["pi", "--provider", provider, "--model", model, "--thinking", thinking, "--print",
            "--session-dir", str(session_dir), *(extra_args or [])]
     if prompt is not None:
         cmd.append(prompt)
+    if cgroup is not None:
+        cmd = cgroup.systemd_run_prefix() + cmd
     return cmd
 
 
@@ -85,14 +124,18 @@ def start_pi(
     extra_args: list[str] | None = None,
     timeout_seconds: float | None = None,
     log_path: str | Path | None = None,
+    cgroup: CgroupLimits | None = None,
 ) -> PiHandle:
     """Non-blocking: starts the process and returns a handle immediately. Caller is responsible for
     polling `handle.proc.poll()` and calling collect_pi_result() once it's not None, or killing it
-    itself once `timeout_seconds` has elapsed (wave.py's scheduler does both)."""
+    itself once `timeout_seconds` has elapsed (wave.py's scheduler does both).
+
+    Pass `cgroup` (a `CgroupLimits`) to run this one process under `systemd-run --user --scope`
+    memory limits; omit it and nothing changes from before."""
     session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
     before = set(session_dir.glob("*.jsonl"))
-    cmd = _build_command(provider, model, thinking, session_dir, prompt, extra_args)
+    cmd = _build_command(provider, model, thinking, session_dir, prompt, extra_args, cgroup)
     log_f = open(log_path, "w", encoding="utf-8") if log_path else subprocess.DEVNULL
     # Own process group, so a timeout kill also reaches any child processes the agent spawned (subagents,
     # tools) -- proc.kill() alone only killed the parent (real gap found in review, 2026-10-16).
