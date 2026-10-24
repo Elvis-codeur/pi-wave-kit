@@ -1,4 +1,4 @@
-from pi_wave_kit.run_pi import CgroupLimits, collect_pi_result, kill_if_timed_out, run_pi, start_pi
+from pi_wave_kit.run_pi import CgroupLimits, collect_pi_result, kill_if_timed_out, resume_pi_headless, run_pi, start_pi
 
 
 def test_run_pi_reads_real_cost_from_the_session_file(fake_pi, tmp_path):
@@ -182,3 +182,101 @@ def test_run_pi_without_cgroup_is_unaffected(fake_pi, tmp_path):
     result = run_pi("job-1", provider="deepseek", model="x", thinking="low", cwd=tmp_path,
                       session_dir=tmp_path / "sessions")
     assert result.returncode == 0
+
+
+def test_resume_pi_headless_appends_to_the_existing_session_file(fake_pi_resumable, tmp_path):
+    """The real end-to-end shape: an existing session (as if from an earlier, now-closed run) gets one
+    more record appended by --session <path>, not replaced -- and the file passed back is the SAME
+    path, now longer."""
+    session_file = tmp_path / "sessions" / "existing.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_text('{"type":"session","id":"s-0"}\n', encoding="utf-8")
+
+    result = resume_pi_headless(
+        "resume-1", session=session_file, prompt="what did we discuss?",
+        provider="deepseek", model="deepseek-flash", thinking="low", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert result.session_file == session_file
+    assert len(session_file.read_text(encoding="utf-8").splitlines()) == 2  # original line + 1 appended
+
+
+def test_resume_pi_headless_counts_only_the_newly_appended_records(fake_pi_resumable, tmp_path):
+    """The real point of this function's own cost-diff logic: an existing file that ALREADY has 3 real
+    usage records (as if from 3 earlier resumes/the original run) must not have those re-counted when
+    one more call appends a 4th -- only the new one is this call's cost. The start_pi/collect_pi_result
+    before/after-NEW-FILE diff would see zero new files here and silently report $0; this must not."""
+    session_file = tmp_path / "sessions" / "existing.jsonl"
+    session_file.parent.mkdir(parents=True)
+    lines = ['{"type":"session","id":"s-0"}']
+    for i in range(3):
+        lines.append(_json_usage_record(f"prior-{i}"))
+    session_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    result = resume_pi_headless(
+        "resume-1", session=session_file, prompt="continue",
+        provider="deepseek", model="deepseek-flash", thinking="low", cwd=tmp_path,
+    )
+
+    assert result.cost_usd == 0.0005  # only the one new record the fake pi appended, not the 3 prior
+    assert result.prompt_tokens == 20
+    assert result.extra["records_before"] == 3
+    assert result.extra["records_after"] == 4
+
+
+def _json_usage_record(suffix: str) -> str:
+    import json as _json
+    return _json.dumps({
+        "type": "message", "id": f"m-{suffix}", "timestamp": "2026-10-24T00:00:00Z",
+        "message": {"role": "assistant", "provider": "deepseek", "model": "deepseek-flash",
+                     "responseId": f"r-{suffix}", "timestamp": "2026-10-24T00:00:00Z",
+                     "usage": {"input": 20, "output": 10, "cost": {"total": 0.0005}}, "content": []},
+    })
+
+
+def test_resume_pi_headless_logs_only_the_delta_to_the_ledger(fake_pi_resumable, tmp_path):
+    session_file = tmp_path / "sessions" / "existing.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_text(
+        '{"type":"session","id":"s-0"}\n' + _json_usage_record("prior-0") + "\n", encoding="utf-8",
+    )
+    ledger = _FakeLedger()
+
+    result = resume_pi_headless(
+        "resume-1", session=session_file, prompt="continue",
+        provider="deepseek", model="deepseek-flash", thinking="low", cwd=tmp_path,
+        ledger=ledger, run_pk=7,
+    )
+
+    assert len(ledger.calls) == 1
+    run_pk, kwargs = ledger.calls[0]
+    assert run_pk == 7
+    assert kwargs["prompt_tokens"] == result.prompt_tokens == 20  # not 40 (the prior record's tokens too)
+    assert kwargs["external_id"] == "pi-wave-kit:resume-1:resume:1"
+
+
+def test_resume_pi_headless_with_no_prior_file_counts_everything_as_new(fake_pi_resumable, tmp_path):
+    """Resuming a session that doesn't exist yet on disk (e.g. the id was never flushed) degrades to
+    "count everything the call produced" -- never crashes, never silently $0."""
+    session_file = tmp_path / "sessions" / "brand-new.jsonl"
+    session_file.parent.mkdir(parents=True)
+    result = resume_pi_headless(
+        "resume-1", session=session_file, prompt="hello",
+        provider="deepseek", model="deepseek-flash", thinking="low", cwd=tmp_path,
+    )
+    assert result.cost_usd == 0.0005
+    assert result.extra["records_before"] == 0
+
+
+def test_resume_pi_headless_with_cgroup(fake_pi_resumable, fake_systemd_run, tmp_path):
+    session_file = tmp_path / "sessions" / "existing.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_text('{"type":"session","id":"s-0"}\n', encoding="utf-8")
+    result = resume_pi_headless(
+        "resume-1", session=session_file, prompt="continue",
+        provider="deepseek", model="deepseek-flash", thinking="low", cwd=tmp_path,
+        cgroup=CgroupLimits(mem_max="300M"),
+    )
+    assert result.returncode == 0
+    assert result.cost_usd == 0.0005

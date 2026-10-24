@@ -64,6 +64,27 @@ Omit `ledger`/`run_pk` and nothing changes from before — this is opt-in, not r
 once, here, means every job in every wave logs itself for the lifetime of the pipeline; nothing further
 to remember per job, per wave, or per agent that happens to be the one running it that day.
 
+## Resuming a closed session headlessly
+
+A session closed after a one-shot `pi -p` run (clean exit, nothing kept alive) can be picked back up
+later, in a brand-new headless process, and it really does have the prior context -- confirmed live
+(2026-10-24): a fact given only in the earlier, closed run was correctly recalled.
+
+```python
+from pi_wave_kit.run_pi import run_pi, resume_pi_headless
+
+first = run_pi("job-1", provider="deepseek", model="deepseek-flash", thinking="low",
+                cwd=".", session_dir="sessions", prompt="Remember X for later.")
+
+# ... later, maybe from a different process entirely ...
+later = resume_pi_headless("job-1-resume", session=first.session_file, prompt="What was X?",
+                            provider="deepseek", model="deepseek-flash", thinking="low", cwd=".")
+```
+
+`session` must be the earlier call's own session FILE PATH (not a bare id). Cost is counted correctly
+even though the file isn't new (resuming appends to it): only the usage records added by THIS call are
+counted, never the whole file's history re-counted or silently reported as $0.
+
 ## A single ad-hoc job from the command line
 
 For one job that doesn't need a whole wave, `pi-wave-job` (console script, installed with this
