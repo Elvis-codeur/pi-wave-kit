@@ -273,5 +273,96 @@ def run_pi(
     return collect_pi_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk, call_purpose=call_purpose)
 
 
+def resume_pi_headless(
+    job_id: str,
+    *,
+    session: str | Path,
+    prompt: str,
+    provider: str,
+    model: str,
+    thinking: str,
+    cwd: str | Path,
+    extra_args: list[str] | None = None,
+    timeout_seconds: float | None = None,
+    log_path: str | Path | None = None,
+    cgroup: CgroupLimits | None = None,
+    ledger: LedgerClient | None = None,
+    run_pk: int | None = None,
+    call_purpose: str = "",
+) -> PiResult:
+    """Continue an existing, CLOSED `pi` session headlessly (`pi -p --session <path>`), picking up its
+    prior context instead of starting fresh. Confirmed live (2026-10-24, deepseek-flash at thinking
+    low): a session closed after one `pi -p` turn (clean exit, nothing kept alive) was asked, in a
+    brand-new process pointed at the same session file, to recall a fact only given in that earlier,
+    closed run -- and did, correctly. This is a real context resume, not just a command that doesn't
+    error.
+
+    `session` must be the EXISTING session's own `.jsonl` FILE PATH (e.g. a prior call's
+    `PiResult.session_file`) -- not a bare session id. Resolving a bare id to a path needs
+    `--session-dir` context this function doesn't carry; give it the file directly (`pi` itself accepts
+    either `--session <path>` or `--session-id <id> --session-dir <dir>` -- both were confirmed to work
+    live, but only the path form is unambiguous without extra context).
+
+    Cost reading here is deliberately NOT `start_pi`/`collect_pi_result`'s before/after-NEW-FILE diff:
+    that diff finds cost by which files are new in a directory, and resuming APPENDS to a file that
+    already existed, so it would see zero new files and silently report $0 -- the exact failure class
+    this project's own history already fixed once (2026-10-16) for a different case (a relaunch into
+    the same dir). The correct diff here is a usage-RECORD COUNT in the one known file, before the call
+    versus after -- the file is append-only, so new records are always the tail."""
+    session_path = Path(session)
+    before_records = read_usage("pi", session_path) if session_path.is_file() else []
+    before_count = len(before_records)
+
+    cmd = ["pi", "--provider", provider, "--model", model, "--thinking", thinking, "--print",
+           "--session", str(session_path), *(extra_args or [])]
+    cmd.append(prompt)
+    if cgroup is not None:
+        cmd = cgroup.systemd_run_prefix() + cmd
+
+    log_f = open(log_path, "w", encoding="utf-8") if log_path else subprocess.DEVNULL
+    proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    started = time.monotonic()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        timed_out = True
+    if log_f is not subprocess.DEVNULL:
+        log_f.close()
+    wall = time.monotonic() - started
+
+    after_records = read_usage("pi", session_path) if session_path.is_file() else []
+    new_records = after_records[before_count:]
+    cost = sum(r.reported_cost_usd or 0.0 for r in new_records)
+    prompt_tokens = sum(r.prompt_tokens for r in new_records)
+    completion_tokens = sum(r.completion_tokens for r in new_records)
+    cache_read_tokens = sum(r.cache_read_tokens for r in new_records)
+    cache_creation_tokens = sum(r.cache_creation_tokens for r in new_records)
+    provider_seen = model_seen = ""
+    if new_records:
+        provider_seen, model_seen = new_records[-1].provider, new_records[-1].model
+
+    result = PiResult(
+        job_id=job_id, returncode=proc.returncode, wall_seconds=wall,
+        session_file=session_path if new_records else None, cost_usd=cost, timed_out=timed_out,
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens,
+        provider=provider_seen, model=model_seen,
+        extra={"resumed_session": str(session_path), "records_before": before_count,
+               "records_after": len(after_records)},
+    )
+    if ledger is not None and run_pk is not None and provider_seen and model_seen:
+        ledger.log_call(
+            run_pk, provider=provider_seen, model=model_seen,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens,
+            billing="api", external_id=f"pi-wave-kit:{job_id}:resume:{before_count}",
+            call_purpose=call_purpose, api_equivalent_cost_usd=round(cost, 6),
+        )
+    return result
+
+
 def new_run_id() -> str:
     return str(uuid.uuid4())
