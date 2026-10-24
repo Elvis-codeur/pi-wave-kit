@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
 pi-wave-job = "pi_wave_kit.cli:main"
@@ -24,3 +24,16 @@ include = ["pi_wave_kit*"]
 
 [tool.setuptools.package-data]
 "pi_wave_kit.plugins.stt_translation" = ["prompts/*.md"]
+
+[tool.ruff]
+# 160, not the default 88/120: this codebase's own narrative style (long docstrings-as-comments
+# explaining WHY, dense one-liners in tests) already runs past 120 in places -- checked the real
+# max (152) rather than picking a number and reformatting the repo to fit it.
+line-length = 160
+target-version = "py310"
+
+[tool.ruff.lint]
+# Pyflakes + pycodestyle + isort: catches real bugs (unused imports/vars, undefined names) and
+# keeps imports sorted, without imposing an opinionated style this already-written codebase
+# would need a disruptive reformat to satisfy. Widen this later if the project wants more.
+select = ["E", "F", "I"]

@@ -1,6 +1,6 @@
 from pi_wave_kit.coordinator import pending_stop_escalations, pi_coordinator_command, summarize_for_coordinator
 from pi_wave_kit.escalate import Escalation, write_record
-from pi_wave_kit.wave import WaveSummary, WaveJobResult
+from pi_wave_kit.wave import WaveJobResult, WaveSummary
 
 
 def test_pi_coordinator_command_includes_the_given_model_and_agent_name():

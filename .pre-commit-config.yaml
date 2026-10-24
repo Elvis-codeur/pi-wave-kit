@@ -1,0 +1,38 @@
+# Local pre-commit checks -- same tests/lint CI runs, but before a commit is allowed, not just
+# after the fact. Uses the `pre-commit` framework (not a raw .git/hooks/pre-commit script) because
+# its config is a tracked file (this one) that every clone gets automatically, instead of a hook
+# script that lives only in .git/ and has to be hand-copied into every working copy -- for a repo
+# other agents and the owner both clone fresh, that matters more than the extra `pip install
+# pre-commit` step costs.
+#
+# Install once per clone:  uv tool install pre-commit  (or: uv pip install pre-commit)
+#                           pre-commit install              # pre-commit hook: lint + tests
+#                           pre-commit install --hook-type commit-msg   # commit-msg hook: subject format
+# Run on demand (no commit): pre-commit run --all-files
+# Both hooks below run via the project's own .venv (relative to the repo root, where pre-commit
+# always runs hooks from) -- not whatever global `ruff`/`pytest` happens to be first on PATH,
+# which may be a bare uv-tool install with none of this project's own dependencies
+# (llm-ledger-client, etc.) on its import path. Create the venv first: `uv venv && uv pip install
+# -e ".[dev]"`.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (pi_wave_kit, tests)
+        entry: .venv/bin/ruff check .
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest (full suite)
+        entry: .venv/bin/pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: commit-message-format
+        name: commit message format (see CONTRIBUTING.md)
+        entry: scripts/check_commit_message.py
+        language: system
+        stages: [commit-msg]
