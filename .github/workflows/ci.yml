@@ -11,11 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # uv, not pip -- this project family's standing rule.
+      # uv, not pip -- this project family's standing rule. No uv.lock exists (this is a library,
+      # not a locked app), so dependency-glob caching has nothing to key on -- leave it off
+      # rather than fail the run on setup-uv's own "no file matched" error.
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
