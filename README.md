@@ -214,6 +214,16 @@ verified output across real translation waves.
 
 ## Status
 
-Freshly extracted (2026-10-15), 35 tests passing (including a real-subprocess integration test via a
-fake `pi` executable on PATH — not a full real-money test yet, that's a separate, explicit step given
-it costs real API money).
+v0.1.0 published (2026-10-26), 108 tests passing.
+
+**Planned (blocked on `agent-watch-daemon` issue #10 landing first, not yet actionable):** owner
+directive 2026-10-26 — once `agent-watch-daemon` (a sibling project, a laptop daemon that makes
+coding-agent sessions remotely monitorable/steerable from a web app) exposes its local
+`127.0.0.1`-only HTTP API, `launch_screen_session()`/`pi-wave-session launch` here should prefer
+it (`POST /local/create`) over the current direct `screen`/tmux invocation, falling back to
+today's behavior unchanged whenever that daemon isn't running or installed. The payoff: every
+`pi` session launched through this library, in any project, becomes steerable from that web app
+automatically, with no caller-side changes anywhere. See
+`agent-watch-web`'s `ARCHITECTURE.md` ("`pi-wave-kit` becomes steerable-by-default...") for the
+full spec. Do this as a real follow-up once the daemon side actually exists and its local API is
+confirmed working — not speculatively ahead of that.
