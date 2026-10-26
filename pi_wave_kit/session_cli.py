@@ -13,9 +13,15 @@ starts is really remotely reachable, not just alive in a pty. See the README's "
 remotely-reachable session" section for the exact equivalent by-hand terminal command and how to
 message a launched session from elsewhere.
 
+By default, `launch` tries `agent-watch-daemon`'s local API first, so the session is immediately
+steerable from the agent-watch web app if that laptop daemon is running -- falling straight through
+to the plain screen launch, unchanged, if it isn't. See `launch_screen_session()`'s own docstring
+for the exact fallback behavior and the recursion guard that stops the daemon's own internal
+`pi-wave-session launch` call from looping back into itself.
+
 Usage:
   pi-wave-session launch <name> <model> <workdir> (--prompt-file FILE | --prompt TEXT)
-      [--provider P] [--thinking T] [--jobs-dir DIR] [--no-mesh] [--no-approve]
+      [--provider P] [--thinking T] [--jobs-dir DIR] [--no-mesh] [--no-approve] [--no-watch]
   pi-wave-session status <name>
   pi-wave-session hardcopy <name> [--jobs-dir DIR] [-o OUT]
   pi-wave-session stop <name>
@@ -68,6 +74,7 @@ def _cmd_launch(args: argparse.Namespace) -> int:
         args.name, provider=args.provider, model=args.model, thinking=args.thinking,
         cwd=workdir, session_dir=session_dir, initial_prompt=initial_prompt,
         log_path=log_path, approve=not args.no_approve,
+        register_with_daemon=not args.no_watch,
     )
     print(f"pi-wave-session: launched {session.name!r} (screen -ls will show it), "
           f"cwd={workdir}, session_dir={session_dir}")
@@ -120,6 +127,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                          help="don't ensure pi-messenger autoRegister config -- the launched session "
                              "will be alive but not remotely reachable unless workdir already has its own config")
     launch.add_argument("--no-approve", action="store_true", help="don't pass --approve to pi")
+    launch.add_argument("--no-watch", action="store_true",
+                         help="don't try agent-watch-daemon's local API first -- always go straight to "
+                             "the direct screen launch, even if the daemon is running. The session is "
+                             "still screen-wrapped and resumable either way (for a session with no "
+                             "multiplexer at all, use pi-wave-job instead, not this flag).")
     launch.set_defaults(func=_cmd_launch)
 
     status = sub.add_parser("status", help="check whether a session is still running")

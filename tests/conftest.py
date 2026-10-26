@@ -2,11 +2,31 @@
 (tests/test_pi_wave.py, agentic-doc-treatement): writes a synthetic session JSONL with a real usage
 record, so run_pi.py's cost-reading path is exercised against a real file, not mocked away."""
 
+import contextlib
 import os
+import socket
 import stat
 import textwrap
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_agent_watch_daemon(monkeypatch):
+    """Safety net, not a feature test: `interactive.AGENT_WATCH_LOCAL_PORT` defaults to
+    agent-watch-daemon's real port (7890). On a machine that actually runs that daemon (this
+    one does -- it's the owner's own laptop), a test calling `launch_screen_session` with its
+    default `register_with_daemon=True` and no port override would silently talk to the REAL
+    daemon and spawn a REAL session -- caught live (2026-10-26): a test asserting
+    `.pi/pi-messenger.json` was never written failed because the real daemon's own
+    `pi-wave-session launch` subprocess wrote it. Autouse, so every test gets a port nothing is
+    listening on by default; `fake_daemon` (test_interactive.py) overrides it back for the tests
+    that specifically want a reachable fake one."""
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    import pi_wave_kit.interactive as interactive_module
+    monkeypatch.setattr(interactive_module, "AGENT_WATCH_LOCAL_PORT", free_port)
 
 
 @pytest.fixture

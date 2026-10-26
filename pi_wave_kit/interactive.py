@@ -30,10 +30,61 @@ reachable from outside."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+# agent-watch-daemon's local-only HTTP API (127.0.0.1, never exposed beyond the laptop --
+# see that repo's local_api.rs). Owner directive 2026-10-26: once that daemon exists, every
+# session this module launches should register with it by default, so it's immediately
+# steerable from the web app -- not just reachable via a hand-typed `screen -r` later.
+AGENT_WATCH_LOCAL_PORT = 7890
+_DAEMON_REQUEST_TIMEOUT_SECONDS = 1.5  # short: this must never make a normal launch feel slow
+# when the daemon (very commonly) isn't running -- a failed/refused connection returns almost
+# instantly, this timeout only matters if something is listening but hung.
+
+
+#: agent-watch-daemon itself shells out to `pi-wave-session launch` to actually fulfill a `pi`
+#: `/local/create` request (confirmed in that repo's `pi_wave.rs`) -- without this guard, that
+#: inner invocation would recurse into THIS same function and try to contact the daemon again,
+#: forever. The daemon must set this exact env var on that one subprocess call (a small,
+#: separate follow-up on that repo, not yet done as of this comment being written); until it
+#: does, `register_with_daemon=True` is only safe to call directly, never from inside something
+#: the daemon itself launched.
+DAEMON_SPAWNED_ENV_VAR = "PI_WAVE_KIT_SKIP_DAEMON"
+
+
+def _try_daemon_create(
+    *, tool: str, cwd: str, args: list[str], prompt: str | None
+) -> dict | None:
+    """Best-effort: ask agent-watch-daemon's local API to create this session instead of doing
+    it ourselves. Returns its JSON response (`{"external_id", "tmux_session_name"}`) on success,
+    or None for ANY failure -- daemon not running (the common case, almost every project using
+    this library has nothing to do with agent-watch), daemon running but rejected the request,
+    network hiccup, malformed response, OR this process was itself spawned BY the daemon
+    (`DAEMON_SPAWNED_ENV_VAR` set) -- that last case isn't a failure, it's the recursion guard:
+    the daemon is already in the middle of creating this exact session, asking it again would
+    loop forever. None here always means "fall back to the direct screen launch below, exactly
+    as if this function didn't exist" -- this is an enhancement, never a new hard dependency a
+    caller's launch can fail because of."""
+    if os.environ.get(DAEMON_SPAWNED_ENV_VAR):
+        return None
+    payload = json.dumps({"tool": tool, "cwd": cwd, "args": args, "prompt": prompt}).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{AGENT_WATCH_LOCAL_PORT}/local/create",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_DAEMON_REQUEST_TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -59,11 +110,27 @@ def launch_screen_session(
     extra_args: list[str] | None = None,
     log_path: str | Path | None = None,
     approve: bool = True,
+    register_with_daemon: bool = True,
 ) -> ScreenSession:
     """Start a real interactive `pi` session inside a detached `screen` scope named `name`.
     `initial_prompt`, if given, is passed to `pi` as its first message, the same way `pi "do X"` works
     when run directly. `approve` passes `--approve` (trust project-local files, e.g.
     `.pi/pi-messenger.json`'s `autoRegister`) -- set False if that trust isn't wanted for this run.
+
+    **Default behavior, owner directive 2026-10-26**: tries `agent-watch-daemon`'s local API
+    first (`register_with_daemon=True`, the default) -- if that laptop daemon is running, the
+    session it creates is immediately visible/steerable from the web app, not just reachable via
+    a hand-typed `screen -r` later. If the daemon isn't running (by far the common case -- most
+    projects using this library have nothing to do with `agent-watch`), this falls straight
+    through to the direct `screen` launch below, completely unchanged from before this feature
+    existed -- the session is still screen-wrapped and resumable, it's just not immediately
+    daemon-registered (the daemon's own normal directory scan will still pick it up later, once
+    it's running). Pass `register_with_daemon=False` to always skip the daemon attempt and go
+    straight to the direct launch (useful for testing, or when daemon visibility genuinely isn't
+    wanted for this one session). **For a session that should never be steerable/resumable at
+    all** -- no screen wrapping, no daemon, nothing -- that's a different function entirely:
+    `pi_wave_kit.run_pi.run_pi()` (CLI: `pi-wave-job`), which already runs a single one-shot
+    process with no multiplexer. This function's whole purpose is the opposite of that.
 
     Sets `PI_AGENT_NAME=<name>` on the launched process -- a real bug found by this function's own
     manual smoke test (2026-10-25): `--name` alone only sets the session's display title, NOT its
@@ -72,6 +139,16 @@ def launch_screen_session(
     known `name` -- being reachable at a name the caller picked -- silently not true."""
     session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
+
+    if register_with_daemon:
+        daemon_result = _try_daemon_create(
+            tool="pi", cwd=str(cwd), args=extra_args or [], prompt=initial_prompt
+        )
+        if daemon_result is not None:
+            return ScreenSession(
+                name=daemon_result.get("tmux_session_name", name),
+                log_path=Path(log_path) if log_path else None,
+            )
 
     pi_cmd = ["pi", "--provider", provider, "--model", model, "--thinking", thinking,
               "--session-dir", str(session_dir), "--name", name, *(extra_args or [])]
