@@ -3,14 +3,23 @@ Uses the fake_screen fixture (tests/conftest.py) -- not the real `screen` binary
 guaranteed present in CI -- to exercise the real argv this module builds end to end: a fake `screen`
 that actually spawns the given command and tracks it, the same shape as the real thing."""
 
+import json
 import os
 import stat
 import textwrap
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 import pytest
 
-from pi_wave_kit.interactive import hardcopy, is_alive, launch_screen_session, stop
+from pi_wave_kit.interactive import (
+    DAEMON_SPAWNED_ENV_VAR,
+    hardcopy,
+    is_alive,
+    launch_screen_session,
+    stop,
+)
 
 
 @pytest.fixture
@@ -107,3 +116,98 @@ def test_stop_on_an_already_dead_session_does_not_raise(fake_pi, fake_screen, tm
     )
     time.sleep(0.3)
     stop(session)  # already exited on its own; must not raise
+
+
+class _FakeDaemon(BaseHTTPRequestHandler):
+    """A minimal stand-in for agent-watch-daemon's real `/local/create` (see that repo's
+    `local_api.rs`) -- just enough to prove `launch_screen_session` talks to it correctly and
+    uses its response, without needing the real Rust daemon in CI."""
+
+    requests: list[dict] = []
+    response_tmux_name = "agent-watch-daemon-session"
+
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.__class__.requests.append(json.loads(self.rfile.read(length)))
+        body = json.dumps(
+            {"external_id": "ext-123", "tmux_session_name": self.__class__.response_tmux_name}
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass  # keep test output clean
+
+
+@pytest.fixture
+def fake_daemon(monkeypatch):
+    """Binds the fake daemon to an OS-assigned ephemeral port (never the real `AGENT_WATCH_LOCAL_PORT`
+    -- that port may genuinely have the real daemon listening on this machine) and monkeypatches
+    `interactive.AGENT_WATCH_LOCAL_PORT` to match, so `_try_daemon_create` talks to this fake one."""
+    _FakeDaemon.requests = []
+    server = HTTPServer(("127.0.0.1", 0), _FakeDaemon)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    import pi_wave_kit.interactive as interactive_module
+    monkeypatch.setattr(interactive_module, "AGENT_WATCH_LOCAL_PORT", server.server_address[1])
+    yield _FakeDaemon
+    server.shutdown()
+
+
+def test_launch_uses_the_daemon_when_it_is_reachable(fake_daemon, fake_pi, fake_screen, tmp_path):
+    """Default behavior (owner directive 2026-10-26): when agent-watch-daemon's local API answers,
+    use ITS session instead of launching screen/pi directly ourselves."""
+    session = launch_screen_session(
+        "alpha", provider="deepseek", model="x", thinking="low",
+        cwd=tmp_path, session_dir=tmp_path / "sessions", initial_prompt="hello there",
+    )
+    assert session.name == "agent-watch-daemon-session"
+    assert fake_daemon.requests == [
+        {"tool": "pi", "cwd": str(tmp_path), "args": [], "prompt": "hello there"}
+    ]
+    # the real screen/pi path was never taken -- fake_screen has no record of "alpha" at all
+    assert is_alive(session) is False
+
+
+def test_launch_falls_back_to_direct_screen_when_daemon_unreachable(fake_pi, fake_screen, tmp_path):
+    """No fake_daemon fixture here -- the autouse `_no_real_agent_watch_daemon` fixture points
+    AGENT_WATCH_LOCAL_PORT at a free port with nothing listening, so this exercises the ordinary
+    fallback path unchanged."""
+    launch_screen_session(
+        "alpha", provider="deepseek", model="x", thinking="low",
+        cwd=tmp_path, session_dir=tmp_path / "sessions",
+    )
+    time.sleep(0.3)
+    assert (tmp_path / "sessions").is_dir()  # the real fake_pi ran
+
+
+def test_register_with_daemon_false_skips_the_daemon_even_though_it_is_reachable(
+    fake_daemon, fake_pi, fake_screen, tmp_path
+):
+    """--no-watch (register_with_daemon=False): always go straight to the direct launch, even
+    though a reachable daemon could have handled it."""
+    launch_screen_session(
+        "alpha", provider="deepseek", model="x", thinking="low",
+        cwd=tmp_path, session_dir=tmp_path / "sessions", register_with_daemon=False,
+    )
+    time.sleep(0.3)
+    assert fake_daemon.requests == []
+    assert (tmp_path / "sessions").is_dir()  # the real fake_pi ran instead
+
+
+def test_daemon_spawned_env_var_prevents_recursion(fake_daemon, fake_pi, fake_screen, tmp_path, monkeypatch):
+    """The real risk this guards: agent-watch-daemon's own `/local/create` handler shells out to
+    `pi-wave-session launch` to actually fulfill a `pi` creation request. Without this guard, that
+    inner invocation would try to contact the daemon again and loop forever. Simulates the daemon
+    having set its env var on that one subprocess call."""
+    monkeypatch.setenv(DAEMON_SPAWNED_ENV_VAR, "1")
+    launch_screen_session(
+        "alpha", provider="deepseek", model="x", thinking="low",
+        cwd=tmp_path, session_dir=tmp_path / "sessions",
+    )
+    time.sleep(0.3)
+    assert fake_daemon.requests == []
+    assert (tmp_path / "sessions").is_dir()  # fell through to the real direct launch, not the daemon
