@@ -155,12 +155,26 @@ counted, never the whole file's history re-counted or silently reported as $0.
 
 ## A single ad-hoc job from the command line
 
+**This is the owner's default way to launch any Pi/agent job as of 2026-10-26** ("let
+pi-wave-kit be our default app") -- install it globally once, from this repo, so it's on `PATH`
+from any project without a per-repo dependency:
+
+```bash
+uv tool install --editable .   # from this repo's root; --editable so local fixes apply immediately
+```
+
+That installs `pi-wave-job` and `pi-wave-session` as real commands, confirmed working from any
+directory. **Never fall back to a raw `pi -p` call or a project-local copy of `pi_job.sh`-style
+shell script** -- five such copies had already drifted across different repos/worktrees by
+2026-10-26 before this became the default; a bug found while using either command gets fixed/
+filed in this repo, not patched around locally wherever it was hit.
+
 For one job that doesn't need a whole wave, `pi-wave-job` (console script, installed with this
-package) is the CLI equivalent of the sibling `agentic-reasoning-translator` project's ad-hoc
-`pi_job.sh`, but built on the tested `run_pi()` path -- it reads the prompt file's content once
-and passes it straight through as a real argv string, never staging it to a destination path, so
-the exact "cp: are the same file" bug class that silently killed a job there (issue #1 / ERRATA
-#43) cannot happen here:
+package) is the CLI equivalent of the sibling `agentic-reasoning-translator` project's old ad-hoc
+`pi_job.sh` (now superseded by this), built on the tested `run_pi()` path -- it reads the prompt
+file's content once and passes it straight through as a real argv string, never staging it to a
+destination path, so the exact "cp: are the same file" bug class that silently killed a job there
+(issue #1 / ERRATA #43) cannot happen here:
 
 ```bash
 pi-wave-job my-job deepseek-flash /path/to/workdir prompt.md \
