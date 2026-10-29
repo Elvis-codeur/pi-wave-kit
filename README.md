@@ -109,6 +109,13 @@ summary = run_wave(
 print(summary.committed_usd, summary.not_successful())
 ```
 
+## Resuming a job that hits its timeout (`resume_fn`, `max_resumes`)
+
+`run_wave(..., resume_fn=..., max_resumes=2)`: when a worker is stopped by `timeout_seconds` while still making progress, its spend so far is
+committed against the wave cap and `resume_fn(job, old_handle, result)` starts a NEW process in the same pi session (typically
+`start_pi(..., extra_args=["--session", str(old_session_file)], prompt="Continue where you stopped...")`). After `max_resumes` a further
+timeout is a failure as before. Both parameters default to off, so existing callers are unchanged.
+
 ## Cost tracking is embedded, not a separate step
 
 `run_pi`/`collect_pi_result` read real token counts from the worker's own Pi session file (via
