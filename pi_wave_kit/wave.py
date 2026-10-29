@@ -79,10 +79,17 @@ def run_wave(
     stop_file: str | Path | None = None,
     poll_seconds: float = 2.0,
     on_event: Callable[[str], None] | None = None,
+    resume_fn: Callable[[WaveJob, _Handle, WaveJobResult], _Handle] | None = None,
+    max_resumes: int = 0,
 ) -> WaveSummary:
     """Blocking: runs until every job has launched-and-finished, been skipped as already-done, or the
     wave stopped launching new ones (wave cap reached, or the stop file appeared). Jobs already present
-    in the summary file with status "success" are skipped entirely (resumable re-run)."""
+    in the summary file with status "success" are skipped entirely (resumable re-run).
+
+    `resume_fn(job, handle, result)` + `max_resumes` (both optional; default off, so existing callers are unchanged): when a
+    job hits its timeout while resumes remain, its spend so far is committed against the wave cap, `resume_fn` returns a NEW
+    handle (typically `start_pi(..., extra_args=["--session", <the old session file>])` with a "continue where you stopped"
+    prompt) and the job keeps running. After `max_resumes` resumes a further timeout is a failure, as before."""
     log = on_event or (lambda _msg: None)
     raw = load_summary(summary_path)
     raw.setdefault("jobs", {})
@@ -96,6 +103,7 @@ def run_wave(
         log(f"skip {job_id}: already succeeded in a previous run of this wave")
 
     running: dict[str, tuple[_Handle, WaveJob]] = {}
+    resumes: dict[str, int] = {}
     stop_reason = ""
     summary = WaveSummary(committed_usd=committed)
 
@@ -106,6 +114,20 @@ def run_wave(
         for job_id, (handle, job) in list(running.items()):
             if is_timed_out(handle):
                 result = collect_fn(handle, True)
+                if resume_fn is not None and resumes.get(job_id, 0) < max_resumes:
+                    # The spend so far is real money: commit it now, then keep the job running in its own session.
+                    resumes[job_id] = resumes.get(job_id, 0) + 1
+                    committed += result.cost_usd
+                    prior = raw["jobs"].get(job_id, {}).get("cost_usd", 0.0)
+                    raw["jobs"][job_id] = {"status": "running", "cost_usd": prior + result.cost_usd,
+                                           "reason": f"timed out; resumed {resumes[job_id]}/{max_resumes}"}
+                    write_summary(summary_path, raw)
+                    try:
+                        running[job_id] = (resume_fn(job, handle, result), job)
+                        log(f"resumed {job_id} after timeout ({resumes[job_id]}/{max_resumes}), committed ${committed:.4f}")
+                        continue
+                    except Exception as exc:
+                        result = WaveJobResult(job_id=job_id, status="failed", cost_usd=0.0, reason=f"resume failed: {exc}")
             elif handle.proc.poll() is None:
                 continue
             else:
