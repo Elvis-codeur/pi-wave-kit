@@ -106,3 +106,51 @@ def test_not_successful_reports_failed_jobs(tmp_path):
     summary = run_wave(jobs, launch_fn=_launcher({}), collect_fn=lambda h, t: WaveJobResult(job_id=h.job_id, status="failed", reason="oops"),
                          is_timed_out=lambda h: False, concurrency=1, wave_cap_usd=10, summary_path=tmp_path / "summary.json")
     assert summary.not_successful() == ["j0"]
+
+
+class _TimeoutOnceHandle(_FakeHandle):
+    def __init__(self, job_id, cost_usd=0.1, status="success", times_out=False):
+        super().__init__(job_id, cost_usd, status)
+        self.times_out = times_out
+
+
+def test_a_timed_out_job_is_resumed_and_its_earlier_spend_still_counts(tmp_path):
+    started = []
+
+    def launch(job):
+        started.append("first")
+        return _TimeoutOnceHandle(job.job_id, cost_usd=0.2, times_out=True)
+
+    def resume(job, handle, result):
+        started.append("resume")
+        assert result.cost_usd == 0.2
+        return _TimeoutOnceHandle(job.job_id, cost_usd=0.3)
+
+    summary = run_wave(
+        [WaveJob("j0", cap_usd=1.0)], launch_fn=launch, collect_fn=_collector, is_timed_out=lambda h: h.times_out,
+        concurrency=1, wave_cap_usd=5, summary_path=tmp_path / "summary.json", resume_fn=resume, max_resumes=2,
+    )
+    assert started == ["first", "resume"]
+    assert summary.finished["j0"].status == "success"
+    assert round(summary.committed_usd, 2) == 0.5  # 0.2 (timed-out attempt) + 0.3 (resumed attempt)
+
+
+def test_resumes_stop_after_max_resumes_and_the_job_fails(tmp_path):
+    def launch(job):
+        return _TimeoutOnceHandle(job.job_id, cost_usd=0.1, times_out=True)
+
+    summary = run_wave(
+        [WaveJob("j0", cap_usd=1.0)], launch_fn=launch, collect_fn=_collector, is_timed_out=lambda h: h.times_out,
+        concurrency=1, wave_cap_usd=5, summary_path=tmp_path / "summary.json",
+        resume_fn=lambda job, h, r: _TimeoutOnceHandle(job.job_id, cost_usd=0.1, times_out=True), max_resumes=2,
+    )
+    assert summary.finished["j0"].status == "failed"
+    assert round(summary.committed_usd, 2) == 0.3  # first attempt + 2 resumed attempts, all counted
+
+
+def test_without_resume_fn_a_timeout_is_still_a_failure(tmp_path):
+    summary = run_wave(
+        [WaveJob("j0", cap_usd=1.0)], launch_fn=lambda job: _TimeoutOnceHandle(job.job_id, times_out=True), collect_fn=_collector,
+        is_timed_out=lambda h: h.times_out, concurrency=1, wave_cap_usd=5, summary_path=tmp_path / "summary.json",
+    )
+    assert summary.finished["j0"].status == "failed"
