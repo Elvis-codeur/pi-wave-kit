@@ -68,6 +68,10 @@ class AgentResult:
     cache_creation_tokens: int = 0
     reasoning_tokens: int = 0  # informational; already inside completion_tokens
     reported_cost_usd: float = 0.0  # the agent's OWN figure -- evidence only; the ledger prices tokens itself
+    # Usage beyond the four token counts, in the ledger's LLMCall.usage_extra shape: the part of
+    # cache_creation_tokens written to the 1-hour cache, server-side web searches, and reasoning
+    # tokens (informational: already counted in completion_tokens).
+    usage_extra: dict = field(default_factory=dict)
     billing: str = "api"  # "api" or "subscription"
     output_path: Path | None = None
     extra: dict = field(default_factory=dict)
@@ -281,6 +285,8 @@ def parse_claude(text: str) -> dict:
         cache_write=usage.get("cache_creation_input_tokens", 0),
         cost=res.get("total_cost_usd") or 0.0,
         model=next(iter(res.get("modelUsage") or {}), ""),
+        write_1h=(usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0),
+        web_searches=(usage.get("server_tool_use") or {}).get("web_search_requests", 0),
     )
     if res.get("is_error"):
         out["error"] = res.get("result") or res.get("subtype") or "error"
@@ -334,12 +340,21 @@ def collect_agent_result(
         prompt_tokens=parsed["prompt"], completion_tokens=parsed["completion"],
         cache_read_tokens=parsed["cache_read"], cache_creation_tokens=parsed["cache_write"],
         reasoning_tokens=parsed["reasoning"], reported_cost_usd=parsed["cost"], billing=handle.billing,
-        output_path=handle.output_path,
+        output_path=handle.output_path, usage_extra=_usage_extra(parsed),
         extra={"resumed_session": handle.resumed_session} if handle.resumed_session else {},
     )
     if ledger is not None and run_pk is not None:
         _log(ledger, run_pk, result, call_purpose)
     return result
+
+
+def _usage_extra(parsed: dict) -> dict:
+    extra = {
+        "cache_write_1h_tokens": parsed.get("write_1h", 0),
+        "web_search_requests": parsed.get("web_searches", 0),
+        "reasoning_tokens": parsed.get("reasoning", 0),
+    }
+    return {k: v for k, v in extra.items() if v}
 
 
 def _stderr_tail(handle: AgentHandle, lines: int = 5) -> str:
@@ -382,6 +397,9 @@ def _log(ledger: LedgerClient, run_pk: int, result: AgentResult, call_purpose: s
         cache_read_tokens=result.cache_read_tokens, cache_creation_tokens=result.cache_creation_tokens,
         billing=result.billing, external_id=f"pi-wave-kit:{result.agent}:{result.job_id}{resume}",
         call_purpose=call_purpose,
+        # Only when non-empty: an older llm-ledger-client would forward usage_extra=None as JSON null,
+        # which the ledger rejects.
+        **({"usage_extra": result.usage_extra} if result.usage_extra else {}),
         # The agent's own figure, kept as evidence beside the ledger's own price (6 decimals or the API 400s).
         api_equivalent_cost_usd=round(result.reported_cost_usd, 6) if result.reported_cost_usd else None,
     )
