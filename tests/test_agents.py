@@ -38,7 +38,9 @@ CLAUDE_OUT = {
     "type": "result", "subtype": "success", "is_error": False, "result": "KUMQUAT",
     "session_id": "8ac734fb-claude", "total_cost_usd": 0.00431512,
     "usage": {"input_tokens": 2, "cache_creation_input_tokens": 20983, "cache_read_input_tokens": 11382,
-              "output_tokens": 9, "output_tokens_details": {"thinking_tokens": 0}},
+              "output_tokens": 9, "output_tokens_details": {"thinking_tokens": 0},
+              "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+              "cache_creation": {"ephemeral_1h_input_tokens": 20983, "ephemeral_5m_input_tokens": 0}},
     "modelUsage": {"claude-haiku-5-5": {"inputTokens": 2, "outputTokens": 9}},
 }
 
@@ -112,6 +114,7 @@ def test_codex_splits_cached_input_out_of_input_tokens(fake_agents, tmp_path, mo
     assert r.ok and r.text == "KUMQUAT" and r.session_id == "01a18c63-thread"
     # input_tokens includes the cached part: 14710 - 4000 fresh, 4000 cached -- never priced twice.
     assert (r.prompt_tokens, r.cache_read_tokens, r.completion_tokens) == (10710, 4000, 8)
+    assert r.usage_extra == {"reasoning_tokens": 3}  # informational, already inside output_tokens
     assert (r.provider, r.model, r.reported_cost_usd) == ("openai", "openai/gpt-5.6-luna", 0.0)
     assert r.billing == "subscription"  # no CODEX_API_KEY: the ChatGPT login
     assert read_calls()[0]["argv"] == ["exec", "--json", "--skip-git-repo-check", "-m", "gpt-5.6-luna", "say it"]
@@ -133,6 +136,8 @@ def test_claude_job_reads_result_object(fake_agents, tmp_path, monkeypatch):
     assert r.ok and r.text == "KUMQUAT" and r.session_id == "8ac734fb-claude"
     assert (r.provider, r.model) == ("anthropic", "anthropic/claude-haiku-5-5")  # the real model, not the alias
     assert (r.prompt_tokens, r.cache_creation_tokens, r.cache_read_tokens, r.completion_tokens) == (2, 20983, 11382, 9)
+    # Claude Code writes its cache for 1 hour, priced at 2x input instead of 1.25x: the ledger needs to know.
+    assert r.usage_extra == {"cache_write_1h_tokens": 20983}
     assert r.billing == "subscription"
 
 
@@ -163,6 +168,7 @@ def test_resume_is_logged_under_its_own_external_id(fake_agents, tmp_path):
     agents.run_agent("claude", "j", prompt="b", model="haiku", cwd=tmp_path, out_dir=tmp_path / "b",
                      session_id="8ac734fb-claude", ledger=ledger, run_pk=1)
     ids = [kw["external_id"] for _, kw in ledger.calls]
+    assert ledger.calls[0][1]["usage_extra"] == {"cache_write_1h_tokens": 20983}
     assert ids == ["pi-wave-kit:claude:j", "pi-wave-kit:claude:j:resume:8ac734fb-claude"]
 
 
