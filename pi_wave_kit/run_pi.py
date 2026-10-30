@@ -125,13 +125,15 @@ def start_pi(
     timeout_seconds: float | None = None,
     log_path: str | Path | None = None,
     cgroup: CgroupLimits | None = None,
+    env: dict | None = None,
 ) -> PiHandle:
     """Non-blocking: starts the process and returns a handle immediately. Caller is responsible for
     polling `handle.proc.poll()` and calling collect_pi_result() once it's not None, or killing it
     itself once `timeout_seconds` has elapsed (wave.py's scheduler does both).
 
     Pass `cgroup` (a `CgroupLimits`) to run this one process under `systemd-run --user --scope`
-    memory limits; omit it and nothing changes from before."""
+    memory limits; omit it and nothing changes from before. `env` adds variables for this process
+    only, e.g. a client's own API key (see _merged_env)."""
     session_dir = Path(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
     before = set(session_dir.glob("*.jsonl"))
@@ -140,7 +142,7 @@ def start_pi(
     # Own process group, so a timeout kill also reaches any child processes the agent spawned (subagents,
     # tools) -- proc.kill() alone only killed the parent (real gap found in review, 2026-10-16).
     proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
-                            start_new_session=True)
+                            start_new_session=True, env=_merged_env(env))
     return PiHandle(
         job_id=job_id, proc=proc, session_dir=session_dir, session_files_before=before,
         log_file=log_f, started_monotonic=time.monotonic(), timeout_seconds=timeout_seconds,
@@ -309,29 +311,76 @@ def resume_pi_headless(
     this project's own history already fixed once (2026-10-16) for a different case (a relaunch into
     the same dir). The correct diff here is a usage-RECORD COUNT in the one known file, before the call
     versus after -- the file is append-only, so new records are always the tail."""
-    session_path = Path(session)
-    before_records = read_usage("pi", session_path) if session_path.is_file() else []
-    before_count = len(before_records)
+    handle = start_pi_resume(job_id, session=session, prompt=prompt, provider=provider, model=model,
+                             thinking=thinking, cwd=cwd, extra_args=extra_args, timeout_seconds=timeout_seconds,
+                             log_path=log_path, cgroup=cgroup)
+    timed_out = False
+    try:
+        handle.proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _kill_group(handle.proc)
+        timed_out = True
+    return collect_pi_resume_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk,
+                                    call_purpose=call_purpose)
 
+
+@dataclass
+class PiResumeHandle:
+    """A running resume of an existing session -- `resume_pi_headless`'s non-blocking half, so a
+    scheduler (run_wave, pi_wave_kit.agents) can resume many sessions at once."""
+
+    job_id: str
+    proc: subprocess.Popen
+    session_path: Path
+    records_before: int
+    log_file: object
+    started_monotonic: float
+    timeout_seconds: float | None
+
+
+def start_pi_resume(
+    job_id: str,
+    *,
+    session: str | Path,
+    prompt: str,
+    provider: str,
+    model: str,
+    thinking: str,
+    cwd: str | Path,
+    extra_args: list[str] | None = None,
+    timeout_seconds: float | None = None,
+    log_path: str | Path | None = None,
+    cgroup: CgroupLimits | None = None,
+    env: dict | None = None,
+) -> PiResumeHandle:
+    """Non-blocking: counts the session's usage records, then starts `pi -p --session <path>`. See
+    resume_pi_headless for why cost is a record-count diff in that one file, not a new-file diff."""
+    session_path = Path(session)
+    before_count = len(read_usage("pi", session_path)) if session_path.is_file() else 0
     cmd = ["pi", "--provider", provider, "--model", model, "--thinking", thinking, "--print",
            "--session", str(session_path), *(extra_args or [])]
     cmd.append(prompt)
     if cgroup is not None:
         cmd = cgroup.systemd_run_prefix() + cmd
-
     log_f = open(log_path, "w", encoding="utf-8") if log_path else subprocess.DEVNULL
     proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
-                            start_new_session=True)
-    started = time.monotonic()
-    timed_out = False
-    try:
-        proc.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        timed_out = True
-    if log_f is not subprocess.DEVNULL:
-        log_f.close()
-    wall = time.monotonic() - started
+                            start_new_session=True, env=_merged_env(env))
+    return PiResumeHandle(job_id=job_id, proc=proc, session_path=session_path, records_before=before_count,
+                          log_file=log_f, started_monotonic=time.monotonic(), timeout_seconds=timeout_seconds)
+
+
+def collect_pi_resume_result(
+    handle: PiResumeHandle,
+    *,
+    timed_out: bool = False,
+    ledger: LedgerClient | None = None,
+    run_pk: int | None = None,
+    call_purpose: str = "",
+) -> PiResult:
+    if handle.log_file is not subprocess.DEVNULL:
+        handle.log_file.close()
+    wall = time.monotonic() - handle.started_monotonic
+    session_path, before_count = handle.session_path, handle.records_before
 
     after_records = read_usage("pi", session_path) if session_path.is_file() else []
     new_records = after_records[before_count:]
@@ -345,7 +394,7 @@ def resume_pi_headless(
         provider_seen, model_seen = new_records[-1].provider, new_records[-1].model
 
     result = PiResult(
-        job_id=job_id, returncode=proc.returncode, wall_seconds=wall,
+        job_id=handle.job_id, returncode=handle.proc.returncode, wall_seconds=wall,
         session_file=session_path if new_records else None, cost_usd=cost, timed_out=timed_out,
         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
         cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens,
@@ -358,10 +407,19 @@ def resume_pi_headless(
             run_pk, provider=provider_seen, model=model_seen,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             cache_read_tokens=cache_read_tokens, cache_creation_tokens=cache_creation_tokens,
-            billing="api", external_id=f"pi-wave-kit:{job_id}:resume:{before_count}",
+            billing="api", external_id=f"pi-wave-kit:{handle.job_id}:resume:{before_count}",
             call_purpose=call_purpose, api_equivalent_cost_usd=round(cost, 6),
         )
     return result
+
+
+def _merged_env(env: dict | None) -> dict | None:
+    """Per-launch environment on top of this process's own: how one job gets a different client's
+    API key or config home (e.g. {"DEEPSEEK_API_KEY": ..., "PI_CODING_AGENT_DIR": ...}) without
+    touching any other job. None means inherit unchanged."""
+    if not env:
+        return None
+    return {**os.environ, **env}
 
 
 def new_run_id() -> str:
