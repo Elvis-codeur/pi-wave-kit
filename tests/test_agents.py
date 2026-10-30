@@ -235,3 +235,33 @@ def test_run_wave_schedules_mixed_agents(fake_agents, fake_pi, tmp_path):
 def test_unknown_agent_is_rejected(tmp_path):
     with pytest.raises(ValueError):
         agents.start_agent("cursor", "x", prompt="p", model="m", cwd=tmp_path, out_dir=tmp_path)
+
+
+def test_cli_agent_flag_runs_codex_and_writes_result_json(fake_agents, tmp_path):
+    from pi_wave_kit.cli import main
+
+    set_output, read_calls = fake_agents
+    set_output("codex", CODEX_OUT)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("say it", encoding="utf-8")
+    rc = main(["cx-1", "gpt-5.6-luna", str(tmp_path), str(prompt), "--agent", "codex",
+               "--jobs-dir", str(tmp_path / "jobs")])
+    assert rc == 0
+    payload = json.loads((tmp_path / "jobs" / "cx-1" / "result.json").read_text())
+    assert payload["agent"] == "codex" and payload["text"] == "KUMQUAT"
+    assert payload["session_id"] == "01a18c63-thread" and payload["model"] == "openai/gpt-5.6-luna"
+
+    rc = main(["cx-2", "gpt-5.6-luna", str(tmp_path), str(prompt), "--agent", "codex",
+               "--session", payload["session_id"], "--jobs-dir", str(tmp_path / "jobs")])
+    assert rc == 0
+    assert read_calls()[-1]["argv"][:3] == ["exec", "resume", "--json"]
+
+
+def test_cli_without_agent_flag_still_runs_pi(fake_pi, tmp_path):
+    from pi_wave_kit.cli import main
+
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("x", encoding="utf-8")
+    assert main(["p", "deepseek-flash", str(tmp_path), str(prompt), "--jobs-dir", str(tmp_path / "jobs")]) == 0
+    payload = json.loads((tmp_path / "jobs" / "p" / "result.json").read_text())
+    assert "agent" not in payload and payload["prompt_tokens"] == 100  # the unchanged pi payload

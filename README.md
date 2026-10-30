@@ -186,6 +186,39 @@ pi-wave-job my-job deepseek-flash /path/to/workdir prompt.md \
 Writes `pi-wave-jobs/my-job/{sessions/,log.txt,result.json}` and exits non-zero if the job failed
 or timed out. Run `pi-wave-job --help` for every option.
 
+## Other coding agents: OpenCode, Codex, Claude Code
+
+`pi_wave_kit.agents` runs the same kind of job on `pi`, `opencode`, `codex` or `claude`: start it
+(a handle `run_wave` can schedule), resume its session with a new message, and get back the final
+text, the session id and real token counts, logged to the ledger if you pass `ledger`/`run_pk`.
+Background and per-agent details: `wiki/research/coding-agents-keys-logins-and-control.md`.
+
+```python
+from pi_wave_kit import agents
+
+first = agents.run_agent("codex", "task-1", prompt="Summarise README.md", model="gpt-5.6-luna",
+                         cwd="/path/to/repo", out_dir="jobs/task-1")
+follow_up = agents.run_agent("codex", "task-1b", prompt="Now list the open questions",
+                             model="gpt-5.6-luna", cwd="/path/to/repo", out_dir="jobs/task-1b",
+                             session_id=first.session_id)   # same conversation, continued
+print(follow_up.text, follow_up.prompt_tokens, follow_up.completion_tokens)
+```
+
+- `model`: `"provider/model"` for pi and opencode (`"deepseek/deepseek-flash"`), the agent's own
+  name for codex (`"gpt-5.6-luna"`) and claude (`"haiku"`, `"sonnet"`).
+- `env={...}` applies to that one job only: run it on a client's own key or config home, e.g.
+  `env={"CODEX_HOME": "~/.codex-client-a"}` or `env={"ANTHROPIC_API_KEY": client_key}`.
+- `billing` is guessed (`"subscription"` for Claude Code/Codex without an API key in the
+  environment, `"api"` otherwise) and can be passed explicitly.
+- In a wave: `launch_fn=lambda job: agents.start_agent(...)`,
+  `collect_fn=lambda h, t: agents.to_wave_result(agents.collect_agent_result(h, timed_out=t))`,
+  `is_timed_out=agents.kill_if_timed_out`. Codex reports no cost, so its jobs count $0 against the
+  wave cap (the ledger still prices their tokens).
+- Tools that need permission prompts in a headless run take the agent's own flags through
+  `extra_args` (e.g. `["--permission-mode", "acceptEdits"]` for claude, `["--auto"]` for opencode).
+- From the command line: `pi-wave-job <name> <model> <workdir> <prompt_file> --agent codex`, and
+  `--session <id>` to continue an earlier job's session.
+
 ## Optional memory isolation per job
 
 Pass a `CgroupLimits` to `start_pi`/`run_pi` and that one process runs under `systemd-run --user

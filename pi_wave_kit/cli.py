@@ -11,8 +11,14 @@ string -- exactly what `start_pi`/`run_pi` always did (`cmd.append(prompt)`, nev
 -- so that exact bug class is structurally impossible here: there is no file-staging step to fail.
 
 Usage: pi-wave-job <name> <model> <workdir> <prompt_file>
+           [--agent pi|opencode|codex|claude] [--session ID]
            [--provider P] [--thinking T] [--mem-max 2500M] [--mem-high H]
            [--timeout SECONDS] [--jobs-dir DIR]
+
+`--agent` (default pi) runs the job on another coding agent through pi_wave_kit.agents (issue #13);
+`model` is then that agent's own model name ("deepseek/deepseek-flash" for opencode, "gpt-5.6-luna"
+for codex, "haiku" for claude). `--session` resumes an earlier job's session (its result.json's
+session_id) with this prompt instead of starting fresh.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import agents
 from .run_pi import CgroupLimits, run_pi
 
 
@@ -37,7 +44,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("workdir", help="pi's working directory (cwd)")
     p.add_argument("prompt_file", help="path to a file whose content is the prompt -- read once "
                                         "and passed as a real argv string, never staged/copied")
-    p.add_argument("--provider", default="deepseek", help="default: deepseek")
+    p.add_argument("--agent", default="pi", choices=agents.AGENTS, help="default: pi")
+    p.add_argument("--session", default="", metavar="ID",
+                    help="resume this session (an earlier result.json's session_id) instead of starting fresh")
+    p.add_argument("--provider", default="deepseek", help="pi only (default: deepseek)")
     p.add_argument("--thinking", default="low", help="default: low")
     p.add_argument("--mem-max", default=None, metavar="LIMIT",
                     help="systemd-run MemoryMax, e.g. 2500M -- omit for no memory isolation")
@@ -70,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cgroup = CgroupLimits(mem_max=args.mem_max, mem_high=args.mem_high) if args.mem_max else None
 
+    if args.agent != "pi" or args.session:
+        return _run_other_agent(args, prompt, out, result_path, cgroup)
+
     result = run_pi(
         args.name,
         provider=args.provider, model=args.model, thinking=args.thinking,
@@ -99,6 +112,30 @@ def main(argv: list[str] | None = None) -> int:
           f"wall_seconds={result.wall_seconds:.1f} timed_out={result.timed_out}")
     print(f"pi-wave-job: result written to {result_path}")
     return 0 if (result.returncode == 0 and not result.timed_out) else 1
+
+
+def _run_other_agent(args: argparse.Namespace, prompt: str, out: Path, result_path: Path,
+                     cgroup: CgroupLimits | None) -> int:
+    model = args.model if args.agent != "pi" or "/" in args.model else f"{args.provider}/{args.model}"
+    result = agents.run_agent(
+        args.agent, args.name, prompt=prompt, model=model, cwd=args.workdir, out_dir=out,
+        session_id=args.session, timeout_seconds=args.timeout, thinking=args.thinking, cgroup=cgroup,
+    )
+    payload = {
+        "job_id": result.job_id, "agent": result.agent, "returncode": result.returncode,
+        "wall_seconds": result.wall_seconds, "session_id": result.session_id, "text": result.text,
+        "error": result.error, "cost_usd": result.reported_cost_usd, "billing": result.billing,
+        "prompt_tokens": result.prompt_tokens, "completion_tokens": result.completion_tokens,
+        "cache_read_tokens": result.cache_read_tokens, "cache_creation_tokens": result.cache_creation_tokens,
+        "provider": result.provider, "model": result.model, "timed_out": result.timed_out,
+        "output_path": str(result.output_path) if result.output_path else None, "extra": result.extra,
+    }
+    result_path.write_text(json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8")
+    print(f"pi-wave-job: {args.name} agent={result.agent} returncode={result.returncode} "
+          f"cost_usd={result.reported_cost_usd:.4f} wall_seconds={result.wall_seconds:.1f} "
+          f"timed_out={result.timed_out}{' error=' + result.error[:200] if result.error else ''}")
+    print(f"pi-wave-job: result written to {result_path}")
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":
