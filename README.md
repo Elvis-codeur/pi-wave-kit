@@ -119,7 +119,9 @@ print(summary.committed_usd, summary.not_successful())
 from llm_ledger_client import LedgerClient
 from pi_wave_kit.run_pi import collect_pi_result
 
-ledger = LedgerClient("http://127.0.0.1:8090/api")
+# $LLM_LEDGER_URL + $LLM_LEDGER_TOKEN (a per-machine token from the hosted ledger's API tokens
+# page), so the same script reports costs from any machine.
+ledger = LedgerClient.from_env(project="my-project")
 run = ledger.create_run("wave-2026-10-15", label="translation-wave")
 
 def collect(handle, timed_out):
