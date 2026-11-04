@@ -67,6 +67,12 @@ def write_summary(path: Path, raw: dict) -> None:
     path.write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
+def _cost_kill_reason(handle) -> str:
+    """The reason a `run_pi.cost_capped` hook recorded when it killed this job for its spend ("" if none)."""
+    reason = getattr(handle, "kill_reason", "") or getattr(getattr(handle, "pi_handle", None), "kill_reason", "")
+    return reason if isinstance(reason, str) else ""
+
+
 def run_wave(
     jobs: list[WaveJob],
     *,
@@ -81,6 +87,8 @@ def run_wave(
     on_event: Callable[[str], None] | None = None,
     resume_fn: Callable[[WaveJob, _Handle, WaveJobResult], _Handle] | None = None,
     max_resumes: int = 0,
+    live_cost_cap: bool = False,
+    cost_poll_seconds: float = 10.0,
 ) -> WaveSummary:
     """Blocking: runs until every job has launched-and-finished, been skipped as already-done, or the
     wave stopped launching new ones (wave cap reached, or the stop file appeared). Jobs already present
@@ -89,7 +97,15 @@ def run_wave(
     `resume_fn(job, handle, result)` + `max_resumes` (both optional; default off, so existing callers are unchanged): when a
     job hits its timeout while resumes remain, its spend so far is committed against the wave cap, `resume_fn` returns a NEW
     handle (typically `start_pi(..., extra_args=["--session", <the old session file>])` with a "continue where you stopped"
-    prompt) and the job keeps running. After `max_resumes` resumes a further timeout is a failure, as before."""
+    prompt) and the job keeps running. After `max_resumes` resumes a further timeout is a failure, as before.
+
+    `live_cost_cap=True` (optional; default off) also enforces each job's OWN `cap_usd` while it runs: its live
+    session spend is re-read every `cost_poll_seconds` and the job's process group is killed once it exceeds the
+    cap (what is left of it, for a resumed job). The launch gate above only RESERVES a running job's cap; without
+    this, a runaway worker's spend is seen only when it ends. Needs pi handles (`start_pi`/`start_pi_resume`, or
+    `agents.start_agent("pi", ...)`): see `pi_wave_kit.run_pi.cost_capped`, which you can also wrap around your
+    own `is_timed_out` instead. A job killed for its cost is recorded `failed` with reason "cost cap: spent $x >
+    cap $y" and is never resumed."""
     log = on_event or (lambda _msg: None)
     raw = load_summary(summary_path)
     raw.setdefault("jobs", {})
@@ -104,20 +120,41 @@ def run_wave(
 
     running: dict[str, tuple[_Handle, WaveJob]] = {}
     resumes: dict[str, int] = {}
+    spent_before: dict[str, float] = {}  # spend already committed for a job that was resumed in this run
     stop_reason = ""
     summary = WaveSummary(committed_usd=committed)
+
+    check_timed_out = is_timed_out
+    if live_cost_cap:
+        from .run_pi import cost_capped  # lazy: wave.py itself stays free of run_pi's dependencies
+
+        def _remaining_cap(handle: _Handle) -> float | None:
+            entry = running.get(handle.job_id)
+            return None if entry is None else entry[1].cap_usd - spent_before.get(handle.job_id, 0.0)
+
+        check_timed_out = cost_capped(is_timed_out, cap_for=_remaining_cap, min_interval_seconds=cost_poll_seconds)
 
     def _stopped() -> bool:
         return bool(stop_file) and Path(stop_file).is_file()
 
     while queue or running:
         for job_id, (handle, job) in list(running.items()):
-            if is_timed_out(handle):
+            if check_timed_out(handle):
                 result = collect_fn(handle, True)
-                if resume_fn is not None and resumes.get(job_id, 0) < max_resumes:
+                cost_kill = _cost_kill_reason(handle)
+                if cost_kill:
+                    # A cost-cap kill is final: resuming would only spend past the cap again.
+                    result.status = "failed"
+                    result.reason = cost_kill if not result.reason or result.reason == cost_kill else f"{cost_kill}; {result.reason}"
+                    result.extra = {**(result.extra or {}), "kill_reason": cost_kill}
+                    # Never count less than the live spend that triggered the kill (a collect_fn may read less).
+                    from .run_pi import session_cost_usd
+                    result.cost_usd = max(result.cost_usd, session_cost_usd(handle))
+                elif resume_fn is not None and resumes.get(job_id, 0) < max_resumes:
                     # The spend so far is real money: commit it now, then keep the job running in its own session.
                     resumes[job_id] = resumes.get(job_id, 0) + 1
                     committed += result.cost_usd
+                    spent_before[job_id] = spent_before.get(job_id, 0.0) + result.cost_usd
                     prior = raw["jobs"].get(job_id, {}).get("cost_usd", 0.0)
                     raw["jobs"][job_id] = {"status": "running", "cost_usd": prior + result.cost_usd,
                                            "reason": f"timed out; resumed {resumes[job_id]}/{max_resumes}"}
