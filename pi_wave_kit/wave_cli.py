@@ -68,6 +68,7 @@ examples:
       --per-job-workdir --require-output out.jsonl --max-resumes 1 --yes-spend
 
 Python equivalent: pi_wave_kit.wave.run_wave(..., live_cost_cap=True). Single job: pi-wave-job.
+Long-lived interactive session you can message later: pi-wave-session.
 Full documentation: README.md, "Capabilities at a glance"."""
 
 
