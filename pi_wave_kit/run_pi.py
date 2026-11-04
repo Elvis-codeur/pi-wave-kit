@@ -60,7 +60,7 @@ class CgroupLimits:
     `mem_high`, if omitted, defaults to 90% of `mem_max` (the same ratio pi_job.sh used) when
     `mem_max` parses as a plain `<int><M|G>`; pass `mem_high` explicitly for any other unit.
     `systemd-run --scope` execs the target command in place (same PID), so the existing
-    process-group kill path in `kill_if_timed_out`/`_kill_group` is unaffected."""
+    process-group kill path in `kill_if_timed_out`/`kill_group` is unaffected."""
 
     mem_max: str
     mem_high: str | None = None
@@ -234,13 +234,19 @@ def _log_to_ledger(ledger: LedgerClient, run_pk: int, result: PiResult, call_pur
     )
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
-    """Kill the whole process group (the agent and any children it spawned), then reap the parent."""
+def kill_group(proc: subprocess.Popen) -> None:
+    """Kill the whole process group (the agent and any children it spawned), then reap the parent.
+    Every process this module starts is its own group leader (`start_new_session=True`), so this
+    reaches subagents and tool processes too, not only `pi` itself."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         proc.kill()
     proc.wait()
+
+
+# Backward-compatible alias: callers imported the private name before kill_group was public (issue #18).
+_kill_group = kill_group
 
 
 def kill_if_timed_out(handle: PiHandle) -> bool:
@@ -250,7 +256,7 @@ def kill_if_timed_out(handle: PiHandle) -> bool:
         return False
     if time.monotonic() - handle.started_monotonic <= handle.timeout_seconds:
         return False
-    _kill_group(handle.proc)
+    kill_group(handle.proc)
     return True
 
 
@@ -270,7 +276,7 @@ def run_pi(
     try:
         handle.proc.wait(timeout=handle.timeout_seconds)
     except subprocess.TimeoutExpired:
-        _kill_group(handle.proc)
+        kill_group(handle.proc)
         timed_out = True
     return collect_pi_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk, call_purpose=call_purpose)
 
@@ -318,7 +324,7 @@ def resume_pi_headless(
     try:
         handle.proc.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        _kill_group(handle.proc)
+        kill_group(handle.proc)
         timed_out = True
     return collect_pi_resume_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk,
                                     call_purpose=call_purpose)

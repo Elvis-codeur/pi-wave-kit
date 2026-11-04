@@ -280,3 +280,37 @@ def test_resume_pi_headless_with_cgroup(fake_pi_resumable, fake_systemd_run, tmp
     )
     assert result.returncode == 0
     assert result.cost_usd == 0.0005
+
+
+def test_kill_group_is_public_and_the_private_alias_still_works(tmp_path):
+    """Issue #18: kill_group is public; _kill_group stays importable for existing callers."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from pi_wave_kit.run_pi import _kill_group, kill_group
+
+    assert _kill_group is kill_group
+    # A parent that spawns a child in its own group: killing the group must take both down.
+    pid_file = tmp_path / "child.pid"
+    code = ("import subprocess,sys,time; c=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+            f"open({str(pid_file)!r},'w').write(str(c.pid)); time.sleep(60)")
+    proc = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    for _ in range(100):
+        if pid_file.is_file() and pid_file.read_text():
+            break
+        time.sleep(0.05)
+    child_pid = int(pid_file.read_text())
+    kill_group(proc)
+    assert proc.returncode is not None
+    for _ in range(50):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        # a killed-but-unreaped child of a dead parent is reparented and reaped by init shortly
+        time.sleep(0.05)
+    else:
+        with open(f"/proc/{child_pid}/stat") as f:
+            assert f.read().split()[2] == "Z"  # at worst a zombie awaiting reaping, never still running

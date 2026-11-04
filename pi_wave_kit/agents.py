@@ -300,7 +300,7 @@ def kill_if_timed_out(handle: AgentHandle) -> bool:
     """run_wave's is_timed_out hook: kills the job's whole process group once past its timeout."""
     if handle.timeout_seconds is None or time.monotonic() - handle.started_monotonic <= handle.timeout_seconds:
         return False
-    pi._kill_group(handle.proc)
+    pi.kill_group(handle.proc)
     return True
 
 
@@ -413,7 +413,7 @@ def run_agent(agent: str, job_id: str, *, ledger: LedgerClient | None = None, ru
     try:
         handle.proc.wait(timeout=handle.timeout_seconds)
     except subprocess.TimeoutExpired:
-        pi._kill_group(handle.proc)
+        pi.kill_group(handle.proc)
         timed_out = True
     return collect_agent_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk,
                                 call_purpose=call_purpose)
