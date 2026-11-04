@@ -13,7 +13,7 @@ string -- exactly what `start_pi`/`run_pi` always did (`cmd.append(prompt)`, nev
 Usage: pi-wave-job <name> <model> <workdir> <prompt_file>
            [--agent pi|opencode|codex|claude] [--session ID]
            [--provider P] [--thinking T] [--mem-max 2500M] [--mem-high H]
-           [--timeout SECONDS] [--jobs-dir DIR]
+           [--cap-usd USD] [--timeout SECONDS] [--jobs-dir DIR]
 
 `--agent` (default pi) runs the job on another coding agent through pi_wave_kit.agents (issue #13);
 `model` is then that agent's own model name ("deepseek/deepseek-flash" for opencode, "gpt-5.6-luna"
@@ -31,32 +31,62 @@ from pathlib import Path
 from . import agents
 from .run_pi import CgroupLimits, run_pi
 
+DESCRIPTION = """\
+Run ONE ad-hoc coding-agent job (default: pi) to completion and write its result.
+
+The prompt file is read once and passed as a real argv string (never copied/staged), so the
+"cp: are the same file" bug class of the old pi_job.sh cannot happen. Output goes to
+<jobs-dir>/<name>/: sessions/ (pi's session files), log.txt, result.json. Exit code 0 only if
+the job exited 0 and was not killed (timeout or cost cap); 2 for a bad prompt file or options.
+
+Cost: result.json's cost_usd is pi's OWN figure, summed from the job's session file(s). For
+DeepSeek pi always prices at the PEAK rate; off-peak is half, so the recorded cost is an upper
+bound (conservative for caps). --cap-usd is a LIVE cap: spend is re-read every few seconds and
+the job's whole process group is killed once it goes over (result.json: kill_reason =
+"cost cap: ..."); it can overshoot by one poll's worth of spend.
+
+Memory: --mem-max runs the job under `systemd-run --user --scope -p MemoryMax=...` so an
+out-of-memory kill takes only this job, never your terminal session.
+
+Related commands: pi-wave-run (a capped wave over a directory of prompt files),
+pi-wave-session (a long-lived, remotely reachable interactive session)."""
+
+EPILOG = """\
+examples:
+  pi-wave-job my-job deepseek-flash . prompt.md --cap-usd 0.30 --timeout 1800 --mem-max 2500M
+  pi-wave-job fix-1 deepseek-flash ~/repo task.md --provider deepseek --thinking medium
+  pi-wave-job fix-1b deepseek-flash ~/repo follow-up.md --session <session_id from result.json>
+  pi-wave-job review gpt-5.6-luna ~/repo review.md --agent codex
+  pi-wave-job q haiku ~/repo q.md --agent claude
+
+Python equivalents: pi_wave_kit.run_pi.run_pi(..., cap_usd=, cgroup=CgroupLimits(...)) and
+pi_wave_kit.agents.run_agent(...). Full documentation: README.md, "Capabilities at a glance"."""
+
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog="pi-wave-job",
-        description="Run one ad-hoc pi job through pi_wave_kit.run_pi.run_pi(), optionally under "
-                    "a systemd-run memory cap. Equivalent to the sibling project's pi_job.sh, "
-                    "without its prompt-file-staging bug class.",
-    )
+    p = argparse.ArgumentParser(prog="pi-wave-job", description=DESCRIPTION, epilog=EPILOG,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("name", help="job id -- also the output subdirectory name under --jobs-dir")
-    p.add_argument("model", help="model name passed to pi --model")
-    p.add_argument("workdir", help="pi's working directory (cwd)")
-    p.add_argument("prompt_file", help="path to a file whose content is the prompt -- read once "
-                                        "and passed as a real argv string, never staged/copied")
-    p.add_argument("--agent", default="pi", choices=agents.AGENTS, help="default: pi")
+    p.add_argument("model", help="model name: pi --model (e.g. deepseek-flash); for --agent opencode "
+                                 "'provider/model', for codex/claude the agent's own model name")
+    p.add_argument("workdir", help="the agent's working directory (cwd)")
+    p.add_argument("prompt_file", help="file whose content is the prompt (read once, passed as argv, never copied)")
+    p.add_argument("--agent", default="pi", choices=agents.AGENTS, help="coding agent to run (default: pi)")
     p.add_argument("--session", default="", metavar="ID",
-                    help="resume this session (an earlier result.json's session_id) instead of starting fresh")
-    p.add_argument("--provider", default="deepseek", help="pi only (default: deepseek)")
-    p.add_argument("--thinking", default="low", help="default: low")
-    p.add_argument("--mem-max", default=None, metavar="LIMIT",
-                    help="systemd-run MemoryMax, e.g. 2500M -- omit for no memory isolation")
-    p.add_argument("--mem-high", default=None, metavar="LIMIT",
-                    help="systemd-run MemoryHigh (default: 90%% of --mem-max)")
+                   help="continue this earlier session (result.json's session_id) with this prompt instead of starting fresh")
+    p.add_argument("--provider", default="deepseek", help="pi provider (default: deepseek)")
+    p.add_argument("--thinking", default="low", help="pi thinking level: off, minimal, low, medium, high, xhigh, max (default: low)")
+    p.add_argument("--cap-usd", type=float, default=None, metavar="USD",
+                   help="live cost cap for this job: kill it once pi's reported spend (peak-priced) exceeds USD. "
+                        "Fresh pi jobs only (not --session, not other agents)")
     p.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
-                    help="kill the job if it runs longer than this")
+                   help="kill the job (whole process group) if it runs longer than this")
+    p.add_argument("--mem-max", default=None, metavar="LIMIT",
+                   help="memory isolation: run under systemd-run with MemoryMax=LIMIT, e.g. 2500M (default: none)")
+    p.add_argument("--mem-high", default=None, metavar="LIMIT",
+                   help="systemd-run MemoryHigh, the throttle point (default: 90%% of --mem-max)")
     p.add_argument("--jobs-dir", default="pi-wave-jobs", metavar="DIR",
-                    help="parent directory for this job's output (default: ./pi-wave-jobs)")
+                   help="parent directory for this job's output (default: ./pi-wave-jobs)")
     return p.parse_args(argv)
 
 
@@ -80,6 +110,13 @@ def main(argv: list[str] | None = None) -> int:
 
     cgroup = CgroupLimits(mem_max=args.mem_max, mem_high=args.mem_high) if args.mem_max else None
 
+    if args.cap_usd is not None and (args.agent != "pi" or args.session):
+        print("pi-wave-job: --cap-usd needs a fresh pi job (no --session, --agent pi): other agents report "
+              "their cost only when they finish, so it cannot be capped live", file=sys.stderr)
+        return 2
+    if args.cap_usd is not None and args.cap_usd <= 0:
+        print("pi-wave-job: --cap-usd must be greater than 0", file=sys.stderr)
+        return 2
     if args.agent != "pi" or args.session:
         return _run_other_agent(args, prompt, out, result_path, cgroup)
 
@@ -87,8 +124,9 @@ def main(argv: list[str] | None = None) -> int:
         args.name,
         provider=args.provider, model=args.model, thinking=args.thinking,
         prompt=prompt, cwd=args.workdir, session_dir=session_dir, log_path=log_path,
-        timeout_seconds=args.timeout, cgroup=cgroup,
+        timeout_seconds=args.timeout, cgroup=cgroup, cap_usd=args.cap_usd,
     )
+    killed_for = result.extra.get("kill_reason", "")
 
     payload = {
         "job_id": result.job_id,
@@ -103,13 +141,16 @@ def main(argv: list[str] | None = None) -> int:
         "provider": result.provider,
         "model": result.model,
         "timed_out": result.timed_out,
+        "cap_usd": args.cap_usd,
+        "kill_reason": killed_for or ("timeout" if result.timed_out else ""),
         "log_path": str(log_path),
         "extra": result.extra,
     }
     result_path.write_text(json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8")
 
     print(f"pi-wave-job: {args.name} returncode={result.returncode} cost_usd={result.cost_usd:.4f} "
-          f"wall_seconds={result.wall_seconds:.1f} timed_out={result.timed_out}")
+          f"wall_seconds={result.wall_seconds:.1f} timed_out={result.timed_out}"
+          + (f" killed: {killed_for}" if killed_for else ""))
     print(f"pi-wave-job: result written to {result_path}")
     return 0 if (result.returncode == 0 and not result.timed_out) else 1
 
