@@ -18,6 +18,7 @@ for running just one (a single ad-hoc task, or a test)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from llm_ledger_client import LedgerClient
 from llm_ledger_client.session_ingest import read_usage
@@ -46,6 +48,7 @@ class PiHandle:
     log_file: object  # the open file handle, closed by collect_pi_result()
     started_monotonic: float
     timeout_seconds: float | None
+    kill_reason: str = ""  # set by a cost_capped() hook when it kills this job for its live spend
 
 
 @dataclass(frozen=True)
@@ -201,6 +204,8 @@ def collect_pi_result(
         extra={"new_session_files": [str(f) for f in new_files], "ambiguous_attribution": True}
               if len(new_files) > 1 else ({"new_session_files": []} if not new_files else {}),
     )
+    if getattr(handle, "kill_reason", ""):
+        result.extra["kill_reason"] = handle.kill_reason
     if len(new_files) > 1:
         # Cost above is the SUM over all new files -- conservative for cap accounting (never under-counts real
         # money). But the files may belong to another process sharing this session_dir, so the per-call ledger
@@ -260,24 +265,145 @@ def kill_if_timed_out(handle: PiHandle) -> bool:
     return True
 
 
+COST_CAP_REASON_PREFIX = "cost cap"
+
+
+def _usage_costs(path: Path) -> list[float]:
+    """`usage.cost.total` of every message line in one Pi session file, in order. Tolerant on purpose:
+    the file is being written while we read it, so a truncated last line or a malformed one is skipped
+    rather than raised (the live poll must never crash the wave). `cost` may be an object `{total}` or
+    a plain number (pi-fork writes the latter, wiki/research/pi-money-usage-recording.md)."""
+    costs: list[float] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    usage = (json.loads(line).get("message") or {}).get("usage")
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                if not isinstance(usage, dict):
+                    continue
+                cost = usage.get("cost")
+                value = cost.get("total", 0) if isinstance(cost, dict) else cost
+                costs.append(float(value or 0))
+    except OSError:
+        pass
+    return costs
+
+
+def session_cost_usd(handle) -> float:
+    """Live spend so far of a RUNNING (or finished) job, read from its own session file(s): the sum of
+    `usage.cost.total` over the session files that are NEW since the job started (a `PiHandle`), or over
+    the records APPENDED since a resume started (a `PiResumeHandle`). An `agents.AgentHandle` wrapping a
+    pi job is unwrapped; any other handle (opencode/codex/claude report cost only at the end) is $0.
+
+    This is Pi's own figure, i.e. DeepSeek's PEAK price at all hours (off-peak is half), so it
+    over-states real spend off-peak: a cap compared against it errs on the safe side."""
+    inner = getattr(handle, "pi_handle", None)
+    if inner is not None:
+        return session_cost_usd(inner)
+    if isinstance(handle, PiResumeHandle) or hasattr(handle, "records_before"):
+        return sum(_usage_costs(Path(handle.session_path))[handle.records_before:])
+    session_dir = getattr(handle, "session_dir", None)
+    if session_dir is None:
+        return 0.0
+    before = set(getattr(handle, "session_files_before", set()))
+    return sum(sum(_usage_costs(f)) for f in Path(session_dir).glob("*.jsonl") if f not in before)
+
+
+def _mark_killed(handle, reason: str) -> None:
+    for h in (handle, getattr(handle, "pi_handle", None)):
+        if h is not None:
+            try:
+                h.kill_reason = reason
+            except AttributeError:  # a handle type that refuses new attributes: the kill still happened
+                pass
+
+
+def cost_capped(
+    is_timed_out: Callable[[object], bool] | None = None,
+    *,
+    cap_usd: float | None = None,
+    cap_for: Callable[[object], float | None] | None = None,
+    min_interval_seconds: float = 5.0,
+    on_kill: Callable[[object, str], None] | None = None,
+) -> Callable[[object], bool]:
+    """Wrap an `is_timed_out` hook (default: `kill_if_timed_out`) so it ALSO kills a job whose live spend
+    exceeds its cap -- the per-job half of budget control that `run_wave`'s launch gate alone cannot give:
+    the gate only reserves a running job's cap, it never sees what that job is spending until it ends, so
+    one runaway worker could spend far past its cap (issue #17; the original translation launcher had this
+    poll, `wiki/rules/translation/pi-wave-runner.md`).
+
+    The cap is `cap_usd` for every job, or `cap_for(handle)` per job (None = no cap for that one). Spend
+    is `session_cost_usd(handle)`, re-read at most every `min_interval_seconds` per job (session files of a
+    long run reach megabytes). A job killed for its cost has `handle.kill_reason` set to
+    "cost cap: spent $x > cap $y", which `collect_pi_result` copies into `PiResult.extra["kill_reason"]` and
+    `run_wave` uses as the failed job's reason. The hook returns True for that kill, exactly like a
+    timeout kill, so it drops into `run_wave(is_timed_out=...)` or any other poll loop unchanged.
+
+    A job can overshoot its cap by what it spends in one poll interval before it is killed."""
+    if cap_usd is None and cap_for is None:
+        raise ValueError("cost_capped needs cap_usd or cap_for")
+    inner = is_timed_out or kill_if_timed_out
+    last_checked: dict[int, float] = {}
+
+    def check(handle) -> bool:
+        if handle.proc.poll() is None:
+            cap = cap_for(handle) if cap_for is not None else cap_usd
+            now = time.monotonic()
+            if cap is not None and now - last_checked.get(id(handle), float("-inf")) >= min_interval_seconds:
+                last_checked[id(handle)] = now
+                spent = session_cost_usd(handle)
+                if spent > cap:
+                    reason = f"{COST_CAP_REASON_PREFIX}: spent ${spent:.4f} > cap ${cap:.4f}"
+                    _logger.warning("pi_wave_kit: killing %s, %s", getattr(handle, "job_id", "?"), reason)
+                    kill_group(handle.proc)
+                    _mark_killed(handle, reason)
+                    if on_kill is not None:
+                        on_kill(handle, reason)
+                    return True
+        return inner(handle)
+
+    return check
+
+
+def kill_reason(handle) -> str:
+    """Why the job behind `handle` was killed by a `cost_capped` hook ("" if it was not)."""
+    return getattr(handle, "kill_reason", "") or getattr(getattr(handle, "pi_handle", None), "kill_reason", "") or ""
+
+
 def run_pi(
     job_id: str,
     *,
     ledger: LedgerClient | None = None,
     run_pk: int | None = None,
     call_purpose: str = "",
+    cap_usd: float | None = None,
+    poll_seconds: float = 5.0,
     **kwargs,
 ) -> PiResult:
     """Blocking convenience wrapper over start_pi()/collect_pi_result() for running just one process.
     `ledger`/`run_pk`/`call_purpose` are forwarded to collect_pi_result() -- give them here and this
-    one real call logs itself automatically, same as the wave path."""
+    one real call logs itself automatically, same as the wave path.
+
+    `cap_usd` (optional) is a LIVE cost cap: the job's session spend is polled every `poll_seconds` and
+    the job is killed once it exceeds the cap (see `cost_capped`); the result then has `timed_out=True`
+    and `extra["kill_reason"] = "cost cap: ..."`. Omit it and nothing changes."""
     handle = start_pi(job_id, **kwargs)
     timed_out = False
-    try:
-        handle.proc.wait(timeout=handle.timeout_seconds)
-    except subprocess.TimeoutExpired:
-        kill_group(handle.proc)
-        timed_out = True
+    if cap_usd is not None:
+        check = cost_capped(kill_if_timed_out, cap_usd=cap_usd, min_interval_seconds=0)
+        while handle.proc.poll() is None:
+            if check(handle):
+                timed_out = True
+                break
+            time.sleep(poll_seconds)
+    else:
+        try:
+            handle.proc.wait(timeout=handle.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            kill_group(handle.proc)
+            timed_out = True
     return collect_pi_result(handle, timed_out=timed_out, ledger=ledger, run_pk=run_pk, call_purpose=call_purpose)
 
 
@@ -342,6 +468,7 @@ class PiResumeHandle:
     log_file: object
     started_monotonic: float
     timeout_seconds: float | None
+    kill_reason: str = ""  # set by a cost_capped() hook when it kills this job for its live spend
 
 
 def start_pi_resume(
@@ -408,6 +535,8 @@ def collect_pi_resume_result(
         extra={"resumed_session": str(session_path), "records_before": before_count,
                "records_after": len(after_records)},
     )
+    if getattr(handle, "kill_reason", ""):
+        result.extra["kill_reason"] = handle.kill_reason
     if ledger is not None and run_pk is not None and provider_seen and model_seen:
         ledger.log_call(
             run_pk, provider=provider_seen, model=model_seen,
