@@ -19,6 +19,7 @@ dev = ["pytest>=8", "ruff>=0.6"]
 [project.scripts]
 pi-wave-job = "pi_wave_kit.cli:main"
 pi-wave-session = "pi_wave_kit.session_cli:main"
+pi-wave-run = "pi_wave_kit.wave_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pi_wave_kit*"]
