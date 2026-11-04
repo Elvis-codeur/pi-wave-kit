@@ -100,3 +100,41 @@ def test_cli_without_mem_max_does_not_require_systemd_run(fake_pi, tmp_path):
         "--jobs-dir", str(tmp_path / "jobs"),
     ])
     assert rc == 0
+
+
+def test_cli_cap_usd_kills_a_runaway_job_and_says_why(spending_pi, tmp_path, monkeypatch, capsys):
+    """Issue #19: --cap-usd is a live cost cap for the one job."""
+    import functools
+
+    import pi_wave_kit.cli as cli
+    from pi_wave_kit.run_pi import run_pi
+
+    monkeypatch.setattr(cli, "run_pi", functools.partial(run_pi, poll_seconds=0.05))
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("do the thing", encoding="utf-8")
+    rc = main(["job-1", "deepseek-flash", str(tmp_path), str(prompt_file),
+               "--jobs-dir", str(tmp_path / "jobs"), "--cap-usd", "0.5"])
+    assert rc == 1
+    payload = json.loads((tmp_path / "jobs" / "job-1" / "result.json").read_text(encoding="utf-8"))
+    assert payload["cap_usd"] == 0.5
+    assert payload["kill_reason"] == "cost cap: spent $1.0000 > cap $0.5000"
+    assert "killed: cost cap" in capsys.readouterr().out
+
+
+def test_cli_cap_usd_is_refused_for_agents_that_cannot_be_capped_live(tmp_path, capsys):
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("do the thing", encoding="utf-8")
+    rc = main(["job-1", "haiku", str(tmp_path), str(prompt_file), "--agent", "claude", "--cap-usd", "0.5",
+               "--jobs-dir", str(tmp_path / "jobs")])
+    assert rc == 2
+    assert "--cap-usd needs a fresh pi job" in capsys.readouterr().err
+
+
+def test_cli_help_documents_cost_recording_caps_and_memory(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    out = capsys.readouterr().out
+    for needle in ("--cap-usd", "PEAK", "off-peak is half", "--mem-max", "systemd-run", "examples:", "pi-wave-run"):
+        assert needle in out

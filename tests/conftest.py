@@ -177,3 +177,27 @@ def fake_systemd_run(tmp_path, monkeypatch):
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     return script
+
+
+@pytest.fixture
+def spending_pi(tmp_path, monkeypatch):
+    """A fake `pi` that writes a session file reporting FAKE_PI_SPEND dollars, then hangs (a runaway worker)."""
+    script = tmp_path / "bin" / "pi"
+    script.parent.mkdir()
+    script.write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys, time
+        args = sys.argv[1:]
+        session_dir = args[args.index("--session-dir") + 1]
+        os.makedirs(session_dir, exist_ok=True)
+        usage = {"input": 10, "output": 5, "cost": {"total": float(os.environ.get("FAKE_PI_SPEND", "1.0"))}}
+        with open(os.path.join(session_dir, f"session-{os.getpid()}.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "message", "id": "m1", "timestamp": "2026-11-04T00:00:00Z",
+                                "message": {"role": "assistant", "provider": "deepseek", "model": "deepseek-flash",
+                                            "responseId": f"r-{os.getpid()}", "timestamp": "2026-11-04T00:00:00Z",
+                                            "usage": usage, "content": []}}) + "\\n")
+        time.sleep(float(os.environ.get("FAKE_PI_HANG", "60")))
+    """), encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(script.parent) + os.pathsep + os.environ["PATH"])
+    return script
