@@ -503,11 +503,12 @@ load-bearing (verbatim payload, exact peer name, closed stdin), so it now lives 
 
 ## Status
 
-v0.1.0 published (2026-10-26). 2026-11-04: live per-job cost cap, `kill_group`, `pi-wave-job --cap-usd`,
-`pi-wave-run`, `pi-wave-session send`/`type`, rewritten `--help` texts; 171 tests passing.
-2026-11-23: native Claude Code background sessions (`claude --bg` start/list/logs/attach/steer/wait/stop/rm,
-`pi-wave-claude`), one-shot JSON via `run_job`; 204 tests passing.
+v0.2.0 published (2026-11-23). Native Claude Code background sessions through `pi-wave-claude`:
+start with `claude --bg`, list/status, ANSI-stripped logs, screen attach/steer, wait, stop/remove,
+one-shot JSON jobs and resumed sessions; permission/tool/dir flags pass through. 205 tests passing.
 
+v0.1.0 published (2026-10-26). 2026-11-04: live per-job cost cap, `kill_group`, `pi-wave-job --cap-usd`,
+`pi-wave-run`, `pi-wave-session send`/`type`, rewritten `--help` texts.
 **Done (issue #8, 2026-10-26):** owner directive 2026-10-26 — once `agent-watch-daemon` (a sibling
 project, a laptop daemon that makes coding-agent sessions remotely monitorable/steerable from a web app)
 exposes its local `127.0.0.1`-only HTTP API, `launch_screen_session()`/`pi-wave-session launch` here should
