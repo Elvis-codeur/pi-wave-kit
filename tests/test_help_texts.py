@@ -11,8 +11,8 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 SCRIPTS = dict(re.findall(r'^(pi-wave-[a-z]+) = "([\w.]+:\w+)"', PYPROJECT.read_text(encoding="utf-8"), re.M))
 
 
-def test_the_three_console_scripts_are_registered():
-    assert set(SCRIPTS) == {"pi-wave-job", "pi-wave-session", "pi-wave-run"}
+def test_the_four_console_scripts_are_registered():
+    assert set(SCRIPTS) == {"pi-wave-job", "pi-wave-session", "pi-wave-run", "pi-wave-claude"}
 
 
 @pytest.mark.parametrize("script", sorted(SCRIPTS))

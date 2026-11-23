@@ -69,6 +69,7 @@ examples:
 
 Python equivalent: pi_wave_kit.wave.run_wave(..., live_cost_cap=True). Single job: pi-wave-job.
 Long-lived interactive session you can message later: pi-wave-session.
+Claude Code native background sessions (--bg): pi-wave-claude.
 Full documentation: README.md, "Capabilities at a glance"."""
 
 

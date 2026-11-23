@@ -22,6 +22,7 @@ Single jobs and isolation
 - [**Memory isolation via systemd-run**](#optional-memory-isolation-per-job) — `CgroupLimits` / `--mem-max`: an out-of-memory kill takes one job, not your terminal.
 - [**Process-group kill**](#live-per-job-cost-cap) — `kill_group(proc)`: kills a job and every subagent/tool process it spawned.
 - [**Other coding agents**](#other-coding-agents-opencode-codex-claude-code) — `pi_wave_kit.agents`: run and resume OpenCode, Codex and Claude Code jobs like pi jobs.
+- [**Claude Code background sessions (native)**](#claude-code-background-sessions-native) — `pi_wave_kit.claude_sessions` / `pi-wave-claude`: start with `claude --bg`, list/status, logs, attach/steer in `screen`, wait, stop/rm; one-shot/resume stays in `agents`.
 - [**Headless resume of a closed session**](#resuming-a-closed-session-headlessly) — `resume_pi_headless`: continue a finished session with its context, cost counted correctly.
 
 Coordination
@@ -35,7 +36,7 @@ Interactive sessions
 - [**Remotely reachable interactive sessions**](#launching-a-remotely-reachable-session-so-you-can-steer-it-later-from-elsewhere) — `pi-wave-session launch`: a pi session in `screen`, joined to the pi-messenger mesh.
 - [**Three ways to reach a running session**](#three-ways-to-reach-a-running-session-and-when-each-is-right) — `pi-wave-session send` (mesh DM, confirmed from the feed), `type` (keystrokes), `hardcopy` (read-only).
 
-Every console script documents itself: `pi-wave-job --help`, `pi-wave-run --help`, `pi-wave-session --help`.
+Every console script documents itself: `pi-wave-job --help`, `pi-wave-run --help`, `pi-wave-session --help`, `pi-wave-claude --help`.
 
 ## Install
 
@@ -47,7 +48,7 @@ from any project without a per-repo dependency:
 uv tool install --editable .   # from this repo's root; --editable so local fixes apply immediately
 ```
 
-That installs `pi-wave-job`, `pi-wave-run` and `pi-wave-session` as real commands, confirmed working
+That installs `pi-wave-job`, `pi-wave-run`, `pi-wave-session` and `pi-wave-claude` as real commands, confirmed working
 from any directory. **Never fall back to a raw `pi -p` call or a project-local copy of
 `pi_job.sh`-style shell script** -- five such copies had already drifted across different
 repos/worktrees by 2026-10-26 before this became the default; a bug found while using either command
@@ -256,6 +257,69 @@ print(follow_up.text, follow_up.prompt_tokens, follow_up.completion_tokens)
 - From the command line: `pi-wave-job <name> <model> <workdir> <prompt_file> --agent codex`, and
   `--session <id>` to continue an earlier job's session.
 
+## Claude Code background sessions (native)
+
+`claude --bg -n NAME "PROMPT"` starts a session that outlives the launching process; unlike
+`claude -p`, it is a live TUI you can inspect and steer, and it keeps running after the shell
+returns. `pi_wave_kit.claude_sessions` (CLI: `pi-wave-claude`) wraps that full lifecycle:
+
+```bash
+pi-wave-claude job review review.md --cwd ~/repo --model haiku   # one-shot: clean JSON + cost
+pi-wave-claude start audit-bg --prompt "Audit the test suite" --cwd ~/repo --model haiku
+pi-wave-claude list --cwd ~/repo                                # active sessions in this directory
+pi-wave-claude list --all --json                                # include completed sessions
+pi-wave-claude status audit-bg
+pi-wave-claude logs audit-bg                                    # ANSI stripped
+pi-wave-claude logs audit-bg --raw                              # exact TUI output
+pi-wave-claude attach audit-bg                                  # screen; detach with Ctrl-A d
+pi-wave-claude steer audit-bg "Also check the docs"             # attach if needed, type, Enter
+pi-wave-claude wait audit-bg --timeout 600
+pi-wave-claude stop audit-bg
+pi-wave-claude rm audit-bg                                      # conversation kept
+```
+
+```python
+from pi_wave_kit.claude_sessions import start_background, wait_for, steer, logs, stop
+
+s = start_background("audit-bg", "Audit the test suite", cwd="/path/to/repo", model="haiku")
+steer(s, "Also check the docs", audit_path="jobs/audit-bg/inject.jsonl")
+print(logs(s))                       # ANSI-stripped recent TUI output
+finished = wait_for(s, timeout=900)  # returns once state/status reports done/idle
+stop(finished)
+```
+
+One constraint found live: `claude -p --resume <id>` refuses a session while Claude still
+holds it as a background process ("That session is running in the background"). Either stop it
+first, or ask Claude to branch a copy by passing `--extra-arg=--fork-session` to `pi-wave-claude
+job` (with `--session <id>`). The fork gets the prior context but a new session id; the original
+background session stays attachable.
+
+- **`--bg` is not `-p`.** `--bg` and `-p/--print` are mutually exclusive (Claude refuses with
+  "--bg and --print conflict"); this library never combines them. For one request whose final text,
+  session id, token counts and reported cost come back as one JSON object, use
+  `pi-wave-claude job`, `pi-wave-job --agent claude`, or
+  `agents.run_agent("claude", ...)`; `claude_sessions.run_job()` delegates to exactly that path.
+  Continue that conversation deterministically with `claude -p --resume <session_id>`
+  (`pi-wave-claude job ... --session <session_id>`, or `agents.run_agent(..., session_id=...)`).
+- **Workspace trust is required for `--bg`.** A fresh background start in an untrusted directory
+  fails with Claude's own "Workspace not trusted" message (`WorkspaceNotTrustedError`, stderr
+  preserved verbatim; the CLI exits 3). Open `claude` once in that directory and accept trust.
+  `-p` skips trust, which is one reason the one-shot path stays useful.
+- **`claude agents --json` lists every Claude session on the machine**, including your own
+  interactive ones. Scoping to one is essential: `get_session()` matches an exact short id, full
+  `sessionId`, or exact name; an ambiguous name is an error; `stop()`/`remove()` re-resolve the live
+  record and pass only its short id, never a guessed or ambiguous name.
+- **Logs are TUI output, not a transcript.** `claude logs` emits terminal frames with ANSI escape
+  sequences; `logs()` strips them by default and `--raw` keeps them. Read it to see what a session
+  is doing; for typed results and real token/cost numbers use the one-shot JSON path.
+- **Attach and steer need a real TTY.** `claude attach` opens the live TUI, so this library starts
+  it detached under GNU `screen` (`attach_in_screen`, idempotent) and sends keystrokes with
+  `screen -X stuff` (`type_into`, Ctrl-U then text then Enter; audited to `inject.jsonl`). There is
+  no non-TTY `claude send`. Typed input may queue behind Claude's current turn or interrupt it,
+  depending on the session's state -- `steer()` is PTY-based steering, not a delivery-confirmed
+  message. `screen -r <name>` reattaches from a terminal; a missing `screen` binary is a clear
+  `ScreenNotFoundError`.
+
 ## Resuming a closed session headlessly
 
 A session closed after a one-shot `pi -p` run (clean exit, nothing kept alive) can be picked back up
@@ -441,6 +505,8 @@ load-bearing (verbatim payload, exact peer name, closed stdin), so it now lives 
 
 v0.1.0 published (2026-10-26). 2026-11-04: live per-job cost cap, `kill_group`, `pi-wave-job --cap-usd`,
 `pi-wave-run`, `pi-wave-session send`/`type`, rewritten `--help` texts; 171 tests passing.
+2026-11-23: native Claude Code background sessions (`claude --bg` start/list/logs/attach/steer/wait/stop/rm,
+`pi-wave-claude`), one-shot JSON via `run_job`; 204 tests passing.
 
 **Done (issue #8, 2026-10-26):** owner directive 2026-10-26 — once `agent-watch-daemon` (a sibling
 project, a laptop daemon that makes coding-agent sessions remotely monitorable/steerable from a web app)

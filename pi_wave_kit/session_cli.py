@@ -183,7 +183,8 @@ Three ways to reach a running session, and when each is right:
             <jobs-dir>/<name>/inject.jsonl (it leaves no trace in the mesh feed).
   hardcopy  read its current screen. Read-only, always safe, free.
 
-For a one-shot job that should NOT stay alive, use pi-wave-job; for a capped batch, pi-wave-run."""
+For a one-shot job that should NOT stay alive, use pi-wave-job; for a capped batch, pi-wave-run.
+For Claude Code's own native background sessions, use pi-wave-claude."""
 
 EPILOG = """\
 examples:

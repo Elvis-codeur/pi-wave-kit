@@ -49,7 +49,8 @@ Memory: --mem-max runs the job under `systemd-run --user --scope -p MemoryMax=..
 out-of-memory kill takes only this job, never your terminal session.
 
 Related commands: pi-wave-run (a capped wave over a directory of prompt files),
-pi-wave-session (a long-lived, remotely reachable interactive session)."""
+pi-wave-session (a long-lived, remotely reachable interactive session), pi-wave-claude (native
+Claude Code background sessions started with --bg)."""
 
 EPILOG = """\
 examples:
